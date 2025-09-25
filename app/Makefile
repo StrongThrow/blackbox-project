@@ -1,25 +1,21 @@
 # =================================================================
 #               App (blackbox_main) 빌드용 Makefile
+#               (Git Submodule 'cJSON' 사용 버전)
 # =================================================================
 
 # --- 컴파일러 및 옵션 정의 ---
 CC = gcc
-# CFLAGS: 컴파일 옵션
-# -Wall: 모든 경고 메시지 출력
-# -I../libhardware/include: ../libhardware/include 경로에서 헤더 파일(hardware.h)을 찾음
-CFLAGS = -Wall -I../libhardware/include
-# LDFLAGS: 링커 옵션
-# -L../build/lib: ../build/lib 경로에서 라이브러리 파일(lib*.so)을 찾음
-# -lhardware: libhardware.so 라이브러리와 링크
-# -lcjson: libcjson.so 라이브러리와 링크 (Yocto OS에 설치되어 있어야 함)
-LDFLAGS = -L../build/lib -lhardware -lcjson
+# CFLAGS: cJSON 헤더 파일 경로(-I../vendor/cJSON) 추가
+CFLAGS = -Wall -I../libhardware/include -I../vendor/cJSON
+# LDFLAGS: 시스템 라이브러리 링크(-lcjson) 제거
+LDFLAGS = -L../build/lib -lhardware
 
 # --- 소스 및 결과물 경로 정의 ---
-# SRC: 컴파일할 소스 파일
-SRC = src/main.c
-# BUILD_DIR: 최종 결과물이 저장될 위치
+# SRC: main.c와 cJSON.c 소스 파일을 모두 포함
+SRC = src/main.c ../vendor/cJSON/cJSON.c
+# BUILD_DIR: 변경 없음
 BUILD_DIR = ../build
-# TARGET: 최종적으로 생성될 실행 파일의 전체 경로
+# TARGET: 변경 없음
 TARGET = $(BUILD_DIR)/bin/blackbox_main
 
 
@@ -29,14 +25,12 @@ TARGET = $(BUILD_DIR)/bin/blackbox_main
 all: $(TARGET)
 
 # 최종 실행 파일($(TARGET))을 생성하는 규칙
-# $@: 목표 파일 이름 (e.g., ../build/bin/blackbox_main)
-# $<: 첫 번째 의존성 파일 이름 (e.g., src/main.c)
+# $^: 모든 의존성 파일 목록 (e.g., src/main.c ../vendor/cJSON/cJSON.c)
 $(TARGET): $(SRC)
-	@echo "Compiling and linking application: $@"
-	# 빌드 결과물이 저장될 디렉터리가 없으면 생성
+	@echo "Compiling and linking application with local cJSON..."
 	@mkdir -p $(@D)
-	# 소스 파일을 컴파일하고, 지정된 라이브러리들과 링크하여 최종 실행 파일을 생성
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	# 소스 파일 목록($^)을 사용하여 컴파일 및 링크
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # 'make clean' 실행 시 컴파일 결과물을 삭제하는 규칙
 clean:
