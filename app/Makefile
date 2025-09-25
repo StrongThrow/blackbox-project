@@ -4,7 +4,7 @@
 # =================================================================
 
 # --- 컴파일러 및 옵션 정의 ---
-CC = gcc
+CC ?= gcc
 # CFLAGS: cJSON 헤더 파일 경로(-I../vendor/cJSON) 추가
 CFLAGS = -Wall -I../libhardware/include -I../vendor/cJSON
 # LDFLAGS: 시스템 라이브러리 링크(-lcjson) 제거

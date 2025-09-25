@@ -24,7 +24,7 @@
 #include <stdint.h>
 #include <signal.h>
 
-#include <cjson/cJSON.h> // JSON 파싱 라이브러리
+#include "cJSON.h" // JSON 파싱 라이브러리
 #include "hardware.h"    // BSP팀 제공 API 명세서
 
 #define AI_SERVER_COMMAND "./ai/vision_server.py"
