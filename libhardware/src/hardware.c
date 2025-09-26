@@ -9,7 +9,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <time.h>          
-#include <cjson/cJSON.h>
+#include "cJSON.h"
 
 static pid_t g_rec_pid = -1;
 static char  g_rec_target[PATH_MAX] = {0};
