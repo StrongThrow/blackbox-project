@@ -1,16 +1,17 @@
 #ifndef HARDWARE_H
 #define HARDWARE_H
-#include <stddef.h> 
+#include <stddef.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 // ================= 1. 공통 및 초기화 API =================
-int hardware_init();
-void hardware_close();
 
 // ================= 2. 카메라 API =================
 typedef struct {
     unsigned char* data; // RGB24
     int width;
     int height;
-    int size;            // bytes
+    size_t size;          // bytes
     void* private_data;  // 내부 상태 포인터(옵션)
 } FrameBuffer;
 
@@ -41,5 +42,7 @@ int can_send_message(const CANMessage* msg);
 int can_receive_message(CANMessage* msg); // 1=수신, 0=없음, <0=에러
 void can_close();
 
-#endif // HARDWARE_H
-
+#ifdef __cplusplus
+}
+#endif
+#endif

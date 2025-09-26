@@ -1,51 +1,54 @@
 # =================================================================
-#           Blackbox Project - 최상위 Makefile (최종 버전)
+#           Blackbox Project - 최상위 Makefile (최종)
 # =================================================================
 
-# --- 배포 기본값 설정 ---
-# 'make deploy' 실행 시 사용할 기본 사용자 이름과 IP 주소
-# 예: make deploy PI_USER=ubuntu PI_IP=192.168.1.10
+# --- 배포 기본값 (필요시 커맨드라인에서 덮어쓰기) ---
 PI_USER ?= pi
-PI_IP ?= 10.10.14.61
+PI_IP   ?= 10.10.14.61
 
-# --- 크로스 컴파일러 설정 ---
-CROSS_COMPILE = aarch64-linux-gnu-
+# --- 기본 툴체인 (환경에서 CC/CXX/PKG_CONFIG가 오면 그걸 사용) ---
+CC         ?= gcc
+CXX        ?= g++
+PKG_CONFIG ?= pkg-config
 
-# 컴파일러 변수 정의 (네이티브 빌드 시 기본값)
-CC ?= gcc
+# --- CROSS_COMPILE 프리셋 (Yocto SDK가 없을 때만 사용) ---
+CROSS_COMPILE ?= aarch64-linux-gnu-
 
-# .PHONY: 가상 목표 선언
 .PHONY: all cross lib app run deploy clean
 
-# 'make' 또는 'make all': 우분투 PC에서 테스트하기 위한 네이티브 빌드
-# app이 lib에 의존하므로, lib가 먼저 빌드됨을 보장합니다.
+# 네이티브 빌드 (호스트 테스트용)
 all: lib app
 
-# 'make cross': 라즈베리파이용으로 크로스 컴파일하는 전용 목표
+# 크로스 빌드
+# - Yocto SDK를 로드한 경우(OECORE_TARGET_SYSROOT 존재)엔 SDK 설정을 그대로 사용
+# - 아니면 CROSS_COMPILE 프리셋로 CC/CXX 지정
 cross:
 	@echo "--- Cross-compiling for Raspberry Pi (ARM64) ---"
-	# CROSS_COMPILE 변수를 설정하여 all 타겟을 실행합니다.
-	$(MAKE) all CC=$(CROSS_COMPILE)gcc
+	@if [ -n "$$OECORE_TARGET_SYSROOT" ]; then \
+		echo "[Yocto SDK detected] CC=$(CC) CXX=$(CXX) PKG_CONFIG=$(PKG_CONFIG)"; \
+		$(MAKE) all CC="$(CC)" CXX="$(CXX)" PKG_CONFIG="$(PKG_CONFIG)"; \
+	else \
+		echo "[Using CROSS_COMPILE=$(CROSS_COMPILE)]"; \
+		$(MAKE) all CC="$(CROSS_COMPILE)gcc" CXX="$(CROSS_COMPILE)g++" PKG_CONFIG="$(PKG_CONFIG)"; \
+	fi
 
-# 라이브러리 빌드
+# 라이브러리 / 앱
 lib:
-	$(MAKE) -C libhardware CC=$(CC)
+	$(MAKE) -C libhardware CC="$(CC)" CXX="$(CXX)" PKG_CONFIG="$(PKG_CONFIG)"
 
-# 애플리케이션 빌드
 app:
-	$(MAKE) -C app CC=$(CC)
+	$(MAKE) -C app CC="$(CC)" CXX="$(CXX)" PKG_CONFIG="$(PKG_CONFIG)"
 
-# 라즈베리파이로 배포하는 규칙
-# 'cross'에 의존하므로, 항상 크로스 컴파일을 먼저 수행합니다.
+# 배포 (크로스 빌드 후)
 deploy: cross
-	@echo "--- Deploying to Raspberry Pi ---"
+	@echo "--- Deploying to Raspberry Pi $(PI_USER)@$(PI_IP) ---"
 	./deploy.sh $(PI_USER) $(PI_IP)
 
-# 실행 규칙 (라즈베리파이에서만 사용)
+# 실행 (타깃에서)
 run:
 	@echo "This target should be run on the Raspberry Pi."
 
-# 정리 규칙
+# 정리
 clean:
 	@echo "--- Cleaning up the project ---"
 	$(MAKE) -C libhardware clean
