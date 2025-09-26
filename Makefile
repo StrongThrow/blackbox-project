@@ -1,54 +1,46 @@
 # =================================================================
-#           Blackbox Project - 최상위 Makefile (최종)
+#           Blackbox Project - 최상위 Makefile (최종 버전)
 # =================================================================
 
-# --- 배포 기본값 (필요시 커맨드라인에서 덮어쓰기) ---
+# --- 배포 기본값 설정 ---
 PI_USER ?= pi
-PI_IP   ?= 10.10.14.61
+PI_IP ?= 10.10.14.61
 
-# --- 기본 툴체인 (환경에서 CC/CXX/PKG_CONFIG가 오면 그걸 사용) ---
-CC         ?= gcc
-CXX        ?= g++
-PKG_CONFIG ?= pkg-config
+# --- 크로스 컴파일러 설정 ---
+CROSS_COMPILE = aarch64-linux-gnu-
 
-# --- CROSS_COMPILE 프리셋 (Yocto SDK가 없을 때만 사용) ---
-CROSS_COMPILE ?= aarch64-linux-gnu-
+# 컴파일러 변수 정의 (네이티브 빌드 시 기본값)
+CC ?= gcc
 
+# .PHONY: 가상 목표 선언
 .PHONY: all cross lib app run deploy clean
 
-# 네이티브 빌드 (호스트 테스트용)
+# 'make' 또는 'make all': 우분투 PC에서 테스트하기 위한 네이티브 빌드
 all: lib app
 
-# 크로스 빌드
-# - Yocto SDK를 로드한 경우(OECORE_TARGET_SYSROOT 존재)엔 SDK 설정을 그대로 사용
-# - 아니면 CROSS_COMPILE 프리셋로 CC/CXX 지정
+# 'make cross': 라즈베리파이용으로 크로스 컴파일하는 전용 목표
 cross:
 	@echo "--- Cross-compiling for Raspberry Pi (ARM64) ---"
-	@if [ -n "$$OECORE_TARGET_SYSROOT" ]; then \
-		echo "[Yocto SDK detected] CC=$(CC) CXX=$(CXX) PKG_CONFIG=$(PKG_CONFIG)"; \
-		$(MAKE) all CC="$(CC)" CXX="$(CXX)" PKG_CONFIG="$(PKG_CONFIG)"; \
-	else \
-		echo "[Using CROSS_COMPILE=$(CROSS_COMPILE)]"; \
-		$(MAKE) all CC="$(CROSS_COMPILE)gcc" CXX="$(CROSS_COMPILE)g++" PKG_CONFIG="$(PKG_CONFIG)"; \
-	fi
+	$(MAKE) all CC=$(CROSS_COMPILE)gcc
 
-# 라이브러리 / 앱
+# 라이브러리 빌드
 lib:
-	$(MAKE) -C libhardware CC="$(CC)" CXX="$(CXX)" PKG_CONFIG="$(PKG_CONFIG)"
+	$(MAKE) -C libhardware CC=$(CC)
 
+# 애플리케이션 빌드
 app:
-	$(MAKE) -C app CC="$(CC)" CXX="$(CXX)" PKG_CONFIG="$(PKG_CONFIG)"
+	$(MAKE) -C app CC=$(CC)
 
-# 배포 (크로스 빌드 후)
+# 라즈베리파이로 배포하는 규칙
 deploy: cross
-	@echo "--- Deploying to Raspberry Pi $(PI_USER)@$(PI_IP) ---"
+	@echo "--- Deploying to Raspberry Pi ---"
 	./deploy.sh $(PI_USER) $(PI_IP)
 
-# 실행 (타깃에서)
+# 실행 규칙 (라즈베리파이에서만 사용)
 run:
 	@echo "This target should be run on the Raspberry Pi."
 
-# 정리
+# 정리 규칙
 clean:
 	@echo "--- Cleaning up the project ---"
 	$(MAKE) -C libhardware clean
