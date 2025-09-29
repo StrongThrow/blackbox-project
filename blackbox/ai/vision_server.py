@@ -17,6 +17,15 @@ from gi.repository import Gst, GstApp
 
 
 
+# ===== 입력(카메라) =====
+SRC_W, SRC_H = 800, 480
+ROWS, COLS   = 2, 3
+NUM_CAMERAS  = ROWS * COLS  # 6
+
+# ===== 출력(타일) =====
+TILE_W, TILE_H = 266, 240
+OUT_W, OUT_H   = 800 , 480
+OUT_FPS        = 15
 
 # GStreamer 및 GObject 라이브러리 로드.
 gi.require_version('Gst', '1.0')
@@ -26,50 +35,72 @@ gi.require_version('GstVideo', '1.0')   # 추가
 # LDH GstVideoReceiver class 선언 시작
 class GstVideoReceiver:
     def __init__(self, port):
-        self.port = port
-        self.pipeline = None
-        self.appsink = None
+        self.port           = port
+        self.pipeline       = None
+        self.appsink        = None
+        self.bus            = None
         self.is_initialized = False
-        self.latest_frame = None
-        self._stop = False
-        self._thread = None
+        self.latest_frame   = None
+        self._stop          = False
+        self._thread        = None
 
     def init_pipeline(self):
         pipeline_str = (
-            f"udpsrc port={self.port} ! "
-            "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
-            "rtpjitterbuffer latency=60 ! "
-            "rtph264depay ! h264parse config-interval=-1 ! "
-            "avdec_h264 max-threads=1 ! "
-            "videoconvert n-threads=1 ! "
-            f"video/x-raw,format=BGR,width={WIDTH},height={HEIGHT} ! "
-            "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
-            "appsink name=sink drop=true max-buffers=1 sync=false"
+            f"udpsrc port={self.port} "
+            "! application/x-rtp,media=video,encoding-name=H264,payload=96 "
+            "! rtph264depay "
+            "! avdec_h264 "
+            "! videoconvert "
+            "! video/x-raw,format=BGR "
+            "! appsink name=sink drop=true max-buffers=1 sync=false"
         )
-
         self.pipeline = Gst.parse_launch(pipeline_str)
-        self.appsink = self.pipeline.get_by_name("sink")
-        self.pipeline.set_state(Gst.State.PLAYING)
+        self.bus      = self.pipeline.get_bus()
+        self.appsink  = self.pipeline.get_by_name("sink")
+
+        ret = self.pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            self.pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError(f"RX pipeline start failed on port {self.port}")
         self.is_initialized = True
+        self._drain_bus()
         return True
 
-    def _pull_frame(self):
-        sample = self.appsink.try_pull_sample(50_000)  # 50ms
-        if not sample:
-            return None
-        buf = sample.get_buffer()
-        caps = sample.get_caps()
-        s = caps.get_structure(0)
-        w, h = int(s.get_value("width")), int(s.get_value("height"))
-        data = buf.extract_dup(0, buf.get_size())
-        if len(data) < w*h*3:
-            return None
-        return np.frombuffer(data, dtype=np.uint8, count=w*h*3).reshape(h, w, 3)
+    def _drain_bus(self):
+        while True:
+            msg = self.bus.pop()
+            if not msg:
+                break
+            if msg.type == Gst.MessageType.ERROR:
+                err, dbg = msg.parse_error()
+                print(f"[RX:{self.port}][ERROR] {err.message}  debug={dbg}")
+            elif msg.type == Gst.MessageType.WARNING:
+                w, dbg = msg.parse_warning()
+                print(f"[RX:{self.port}][WARN] {w.message}  debug={dbg}")
 
-    def release(self):
-        if self.is_initialized and self.pipeline:
-            self.pipeline.set_state(Gst.State.NULL)
-            self.is_initialized = False
+    def _pull_frame(self):
+        sample = self.appsink.try_pull_sample(50 * Gst.MSECOND)
+        if not sample:
+            self._drain_bus()
+            return None
+
+        buf  = sample.get_buffer()
+        caps = sample.get_caps()
+        s    = caps.get_structure(0)
+        w, h = int(s.get_value("width")), int(s.get_value("height"))
+        fmt  = s.get_value("format")
+        #print(f"[RX:{self.port}] got frame {w}x{h} fmt={fmt}")  # 디버그 로그
+
+        ok, mapinfo = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+
+        try:
+            data = np.frombuffer(mapinfo.data, dtype=np.uint8)
+            frame = data.reshape((h, w, 3))   # RGB 3채널
+            return frame
+        finally:
+            buf.unmap(mapinfo)
 
     def _loop(self):
         while not self._stop:
@@ -88,7 +119,77 @@ class GstVideoReceiver:
             self._thread.join()
         if self.is_initialized and self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
+            self.is_initialized = False
+
 # LDH GstVideoReceiver class 선언 끝
+# LDH DisplayRGB class 선언 시작
+SINK_PIPELINE = "videoconvert ! kmssink sync=false"
+SINK_CAPS = f"video/x-raw,format=RGBx,width={OUT_W},height={OUT_H},framerate={OUT_FPS}/1"
+
+
+class DisplayRGB:
+    def __init__(self):
+        desc = (
+            "appsrc name=src is-live=true do-timestamp=true format=time "
+            f"caps={SINK_CAPS} ! queue ! {SINK_PIPELINE}"
+        )
+        self.pipeline = Gst.parse_launch(desc)
+        self.bus      = self.pipeline.get_bus()
+        self.appsrc   = self.pipeline.get_by_name("src")
+
+        ret = self.pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            self.pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError("Display pipeline start failed (RGB)")
+        self._drain_bus()
+
+    def _drain_bus(self):
+        while True:
+            msg = self.bus.pop()
+            if not msg:
+                break
+            if msg.type == Gst.MessageType.ERROR:
+                err, dbg = msg.parse_error()
+                print(f"[Display][ERROR] {err.message}  debug={dbg}")
+            elif msg.type == Gst.MessageType.WARNING:
+                w, dbg = msg.parse_warning()
+                print(f"[Display][WARN] {w.message}  debug={dbg}")
+
+    def push_rgb(self, frame_bgr):
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        frame_rgbx = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2RGBA)   # RGBA = RGBx
+        frame_rgbx = np.ascontiguousarray(frame_rgbx, dtype=np.uint8)
+
+        buf = Gst.Buffer.new_wrapped(frame_rgbx.tobytes())
+        ts = int(time.time() * Gst.SECOND)
+        buf.pts = ts
+        buf.dts = ts
+        buf.duration = Gst.SECOND // OUT_FPS
+
+        self.appsrc.emit("push-buffer", buf)
+
+    def close(self):
+        if self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = self.appsrc = self.bus = None
+# LDH DisplayRGB class 선언 끝
+def tile_grid_rgb(frames, rows=ROWS, cols=COLS, tile_w=TILE_W, tile_h=TILE_H):
+    total = rows * cols
+    padded = list(frames)[:total]
+    while len(padded) < total:
+        padded.append(np.zeros((SRC_H, SRC_W, 3), dtype=np.uint8))  # RGB 검정
+    tiles = []
+    idx = 0
+    for _ in range(rows):
+        row_imgs = []
+        for _ in range(cols):
+            f = padded[idx]
+            if f is None:
+                f = np.zeros((SRC_H, SRC_W, 3), dtype=np.uint8)
+            row_imgs.append(cv2.resize(f, (tile_w, tile_h)))
+            idx += 1
+        tiles.append(np.hstack(row_imgs))
+    return np.vstack(tiles)  # RGB
 
 def log(message):
     """디버깅 메시지를 표준 에러(stderr)로 출력하는 함수. C로 가는 데이터(stdout)와 섞이지 않게 함."""
@@ -141,15 +242,19 @@ def main():
     # pipeline.set_state(Gst.State.PLAYING)
 
     # LDH pipeline을 통해 이미지 받는 객체 생성 시작 
-    receivers = [GstVideoReceiver(5000+i) for i in range(6)]
+    receivers = [GstVideoReceiver(5000 + i) for i in range(NUM_CAMERAS)]
     for r in receivers:
         r.init_pipeline()
         r.start()
+
+    display = DisplayRGB()
     # LDH pipeline을 통해 이미지 받는 객체 생성 끝
 
     log("GStreamer pipeline is running. Waiting for commands from C via stdin.")
 
     try:
+        period = 1.0 / OUT_FPS
+        next_t = time.time()
         # --- 2. C로부터의 명령을 기다리는 메인 루프 ---
         while True:
             # sys.stdin.readline()은 C에서 명령을 보낼 때까지 여기서 실행을 멈추고 대기합니다.
@@ -164,11 +269,12 @@ def main():
                 #frame = get_single_frame(appsink)
                 frames = [] #이미지 넣을 리스트
 
-                for r in receivers:
-                    frame = r.latest_frame
-                    if frame is None:
-                        frame = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
-                    frames.append(frame)
+                frames = [r.latest_frame for r in receivers]   # 각 프레임: RGB 또는 None
+                grid   = tile_grid_rgb(frames, ROWS, COLS, TILE_W, TILE_H)  # RGB
+
+                grid = cv2.resize(grid, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
+
+                display.push_rgb(grid)  # RGB 그대로 출력 imsi UI나중에 만들어지면 그때 다시
 
                 if frames is not None:
                     # [ 여기에 실제 AI 모델 추론 코드를 삽입합니다. ]
