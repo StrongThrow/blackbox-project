@@ -31,6 +31,7 @@
 #include <fcntl.h>      // fcntl() 함수 사용 (파일 디스크립터 속성 제어)
 #include <sys/time.h>   // timeval 구조체 사용 (select 타임아웃)
 #include "cJSON.h"      // cJSON 라이브러리 사용을 위한 헤더
+#include "hardware.h"
 
 // --- 2. main 함수: 모든 코드의 시작점 ---
 int main() {
@@ -103,9 +104,12 @@ int main() {
 
         // --- 4-2. 비동기 I/O를 위한 파일 디스크립터(fd) 설정 ---
         int pipe_fd = python_to_c_pipe[0];
-        // [!!!] 실제 CAN 소켓을 초기화하고 파일 디스크립터를 받아와야 합니다.
-        // int can_fd = init_can_socket("can0");
-        int can_fd = -1; // <<<<<<<<<<<< 이 부분은 예시이며, 실제 CAN fd로 교체해야 합니다.
+        //CAN 버스 초기화
+        int can_fd = can_init("can0");
+        if(can_fd < 0){
+            fprintf(stderr, "[C] FATAL: Failed to initialize CAN bus. Exiting.\n");
+            exit(EXIT_FAILURE);
+        }
 
         // [중요] select()를 위해 감시할 fd들을 논블로킹(Non-blocking) 모드로 설정합니다.
         fcntl(pipe_fd, F_SETFL, O_NONBLOCK);
@@ -135,13 +139,14 @@ int main() {
             fd_set read_fds;
             FD_ZERO(&read_fds);                 // 감시 목록 초기화
             FD_SET(pipe_fd, &read_fds);         // Python 파이프를 감시 목록에 추가
-            // if (can_fd != -1) FD_SET(can_fd, &read_fds); // CAN 소켓을 감시 목록에 추가
+            FD_SET(can_fd, &read_fds);          // CAN 통신 파이프를 감시 목록에 추가
 
-            int max_fd = pipe_fd;
+            //1. 두 fd중 더 큰 값을 찾아서 max_fd에 저장
+            int max_fd = (pipe_fd > can_fd) ? pipe_fd : can_fd;
             struct timeval timeout;
             timeout.tv_sec = 1; timeout.tv_usec = 0; // 1초간 응답 없으면 타임아웃
             
-            // select() 함수는 감시 목록에 변화가 생길 때까지 여기서 효율적으로 대기합니다(잠자기).
+            // select() 함수에 "가장 큰 번호 + 1"을 전달
             int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
 
             if (activity < 0) { perror("select() error"); break; }
@@ -158,7 +163,9 @@ int main() {
                 }
             }
             // [ CAN 버스에서 메시지가 도착했는지 확인 ]
-            // if (can_fd != -1 && FD_ISSET(can_fd, &read_fds)) { ... }
+            if (FD_ISSET(can_fd, &read_fds)){
+                int result = can_receive_message(&lastest_can_frame);
+            }
             
             // [!!!] 테스트를 위해, 분석 요청이 나간 상태라면 CAN 메시지는 항상 받았다고 시뮬레이션
             if (analysis_requested) {
