@@ -9,10 +9,86 @@ import sys
 import json
 import gi
 import numpy as np
+# LDH gi클래스 구현을 위한 import 시작
+import gi, numpy as np, time, cv2
+import threading
+from gi.repository import Gst, GstApp
+# LDH gi클래스 구현을 위한 import 끝
+
+
+
 
 # GStreamer 및 GObject 라이브러리 로드.
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst
+gi.require_version('GstApp', '1.0')     # 추가 
+gi.require_version('GstVideo', '1.0')   # 추가
+
+# LDH GstVideoReceiver class 선언 시작
+class GstVideoReceiver:
+    def __init__(self, port):
+        self.port = port
+        self.pipeline = None
+        self.appsink = None
+        self.is_initialized = False
+        self.latest_frame = None
+        self._stop = False
+        self._thread = None
+
+    def init_pipeline(self):
+        pipeline_str = (
+            f"udpsrc port={self.port} ! "
+            "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000 ! "
+            "rtpjitterbuffer latency=60 ! "
+            "rtph264depay ! h264parse config-interval=-1 ! "
+            "avdec_h264 max-threads=1 ! "
+            "videoconvert n-threads=1 ! "
+            f"video/x-raw,format=BGR,width={WIDTH},height={HEIGHT} ! "
+            "queue max-size-buffers=2 max-size-time=0 max-size-bytes=0 leaky=downstream ! "
+            "appsink name=sink drop=true max-buffers=1 sync=false"
+        )
+
+        self.pipeline = Gst.parse_launch(pipeline_str)
+        self.appsink = self.pipeline.get_by_name("sink")
+        self.pipeline.set_state(Gst.State.PLAYING)
+        self.is_initialized = True
+        return True
+
+    def _pull_frame(self):
+        sample = self.appsink.try_pull_sample(50_000)  # 50ms
+        if not sample:
+            return None
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        s = caps.get_structure(0)
+        w, h = int(s.get_value("width")), int(s.get_value("height"))
+        data = buf.extract_dup(0, buf.get_size())
+        if len(data) < w*h*3:
+            return None
+        return np.frombuffer(data, dtype=np.uint8, count=w*h*3).reshape(h, w, 3)
+
+    def release(self):
+        if self.is_initialized and self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+            self.is_initialized = False
+
+    def _loop(self):
+        while not self._stop:
+            frame = self._pull_frame()
+            if frame is not None:
+                self.latest_frame = frame
+
+    def start(self):
+        self._stop = False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop = True
+        if self._thread:
+            self._thread.join()
+        if self.is_initialized and self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+# LDH GstVideoReceiver class 선언 끝
 
 def log(message):
     """디버깅 메시지를 표준 에러(stderr)로 출력하는 함수. C로 가는 데이터(stdout)와 섞이지 않게 함."""
@@ -54,16 +130,23 @@ def main():
     # - max-buffers=1: 프레임을 최대 1개만 저장. (메모리 절약)
     # - drop=true: 버퍼가 꽉 찼을 때 새 프레임이 오면, '헌 프레임은 버리고' 새 것으로 교체.
     # -> 이 두 설정 덕분에 C의 요청이 뜸해도 데이터가 쌓이지 않고, 항상 '가장 최신 프레임'만 유지됩니다.
-    pipeline_str = (
-        "udpsrc port=5000 ! "
-        "application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! "
-        "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! "
-        "video/x-raw,format=BGR ! appsink name=sink max-buffers=1 drop=true"
-    )
-    
-    pipeline = Gst.parse_launch(pipeline_str)
-    appsink = pipeline.get_by_name('sink')
-    pipeline.set_state(Gst.State.PLAYING)
+    # pipeline_str = (
+    #     "udpsrc port=5000 ! "
+    #     "application/x-rtp, media=video, clock-rate=90000, encoding-name=H264, payload=96 ! "
+    #     "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! "
+    #     "video/x-raw,format=BGR ! appsink name=sink max-buffers=1 drop=true"
+    # )
+    # pipeline = Gst.parse_launch(pipeline_str)
+    # appsink = pipeline.get_by_name('sink')
+    # pipeline.set_state(Gst.State.PLAYING)
+
+    # LDH pipeline을 통해 이미지 받는 객체 생성 시작 
+    receivers = [GstVideoReceiver(5000+i) for i in range(6)]
+    for r in receivers:
+        r.init_pipeline()
+        r.start()
+    # LDH pipeline을 통해 이미지 받는 객체 생성 끝
+
     log("GStreamer pipeline is running. Waiting for commands from C via stdin.")
 
     try:
@@ -78,12 +161,19 @@ def main():
             
             log(f"Received command from C: {command.strip()}")
             if "analyze" in command.strip():
-                frame = get_single_frame(appsink)
-                
-                if frame is not None:
+                #frame = get_single_frame(appsink)
+                frames = [] #이미지 넣을 리스트
+
+                for r in receivers:
+                    frame = r.latest_frame
+                    if frame is None:
+                        frame = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+                    frames.append(frame)
+
+                if frames is not None:
                     # [ 여기에 실제 AI 모델 추론 코드를 삽입합니다. ]
-                    ai_result = {"status": "success", "frame_shape": frame.shape}
-                    log(f"Frame analysis complete. Shape: {frame.shape}")
+                    ai_result = {"status": "success", "frame_shape": frames.shape}
+                    log(f"Frame analysis complete. Shape: {frames.shape}")
                 else:
                     ai_result = {"status": "fail", "reason": "Could not get frame from GStreamer"}
                     log("Frame analysis failed.")
@@ -98,7 +188,10 @@ def main():
         log("KeyboardInterrupt caught, exiting.")
     finally:
         # 스크립트 종료 시 파이프라인을 정지시켜 자원을 정리합니다.
-        pipeline.set_state(Gst.State.NULL)
+        # pipeline.set_state(Gst.State.NULL)
+        for r in receivers:
+            r.stop()
+        cv2.destroyAllWindows()
         log("Pipeline stopped. Script finished.")
 
 if __name__ == '__main__':
