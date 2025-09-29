@@ -37,7 +37,7 @@ typedef struct {
     unsigned char data[8];
 } CANMessage;
 
-int can_init(int bitrate);
+int can_init(const char* interface_name); // <<-- 수정: 인터페이스 이름을 받고, 성공 시 fd를 반환하도록 변경
 int can_send_message(const CANMessage* msg);
 int can_receive_message(CANMessage* msg); // 1=수신, 0=없음, <0=에러
 void can_close();
