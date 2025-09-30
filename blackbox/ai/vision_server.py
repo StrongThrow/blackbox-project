@@ -12,7 +12,7 @@ import numpy as np
 # LDH gi클래스 구현을 위한 import 시작
 import gi, numpy as np, time, cv2
 import threading
-from gi.repository import Gst, GstApp
+from gi.repository import Gst, GstApp, GstVideo
 # LDH gi클래스 구현을 위한 import 끝
 
 
@@ -26,6 +26,11 @@ NUM_CAMERAS  = ROWS * COLS  # 6
 TILE_W, TILE_H = 266, 240
 OUT_W, OUT_H   = 800 , 480
 OUT_FPS        = 15
+
+
+SINK_PIPELINE = "videoconvert ! kmssink sync=false"
+SINK_CAPS = f"video/x-raw,format=RGBx,width={OUT_W},height={OUT_H},framerate={OUT_FPS}/1"
+
 
 # GStreamer 및 GObject 라이브러리 로드.
 gi.require_version('Gst', '1.0')
@@ -123,9 +128,6 @@ class GstVideoReceiver:
 
 # LDH GstVideoReceiver class 선언 끝
 # LDH DisplayRGB class 선언 시작
-SINK_PIPELINE = "videoconvert ! kmssink sync=false"
-SINK_CAPS = f"video/x-raw,format=RGBx,width={OUT_W},height={OUT_H},framerate={OUT_FPS}/1"
-
 
 class DisplayRGB:
     def __init__(self):
