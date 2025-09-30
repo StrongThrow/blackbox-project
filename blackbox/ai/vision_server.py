@@ -267,11 +267,13 @@ def main():
                 break
             
             log(f"Received command from C: {command.strip()}")
+            
             if "analyze" in command.strip():
                 #frame = get_single_frame(appsink)
                 frames = [] #이미지 넣을 리스트
 
                 frames = [r.latest_frame for r in receivers]   # 각 프레임: RGB 또는 None
+                frames = np.array(frames)  # numpy 형태여야 shape도 가능함
                 grid   = tile_grid_rgb(frames, ROWS, COLS, TILE_W, TILE_H)  # RGB
 
                 grid = cv2.resize(grid, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
