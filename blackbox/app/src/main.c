@@ -30,10 +30,65 @@
 #include <errno.h>      // 시스템 에러 코드를 담고 있는 errno 변수
 #include <fcntl.h>      // fcntl() 함수 사용 (파일 디스크립터 속성 제어)
 #include <sys/time.h>   // timeval 구조체 사용 (select 타임아웃)
+#include <sys/select.h> // select() 원형
 #include "cJSON.h"      // cJSON 라이브러리 사용을 위한 헤더
 #include "hardware.h"
 
-// --- 2. main 함수: 모든 코드의 시작점 ---
+// --- 2. 전역 변수 ---
+static pid_t python_pid = -1;
+static FILE* stream_to_python = NULL;
+static FILE* stream_from_python = NULL;
+static int pipe_from_python_fd = -1;
+
+#define STATE_AI_RESULT_RECEIVED    0x01
+#define STATE_SPEED_RECEIVED        0x02
+#define STATE_RPM_RECEIVED          0x04
+#define COMPLITE_GET_DATA   (0x01|0x02|0x04)
+
+/* =======================================================================================
+ * ===== [ADD] 헬퍼: 파이썬 analyze 요청 라인 프로토콜 전송 (GPS/STEER 포함) ==================
+ *  - 목적: 필수 데이터(GPS, 스티어링)가 준비된 시점에 단 한 줄로 명령을 보냄.
+ *  - 형식: C -> Py 로 "analyze {json}\n"
+ *  - 주의: fflush( ) 필수 (라인버퍼링 보장)
+ * ======================================================================================= */
+static int send_ai_request(FILE* to_py, const VehicleData* v) {
+    if (!to_py || !v) return -1;
+
+    /* JSON에 부동소수점 수치를 넣을 때는 소수점 자릿수를 제한하여
+       (1) 불필요한 문자열 길이를 줄이고 (2) 파이썬측 파싱 안정성을 확보한다. */
+    int n = fprintf(to_py,
+                    "analyze {\"gps\":[%.2f,%.2f],\"steer\":%.2f}\n",
+                    v->gps_x, v->gps_y, v->degree);
+    if (n <= 0) return -1;
+
+    /* 매우 중요: stdio 버퍼가 파이프로 실제 전달되도록 즉시 비움 */
+    fflush(to_py);
+    return 0;
+}
+
+/* =======================================================================================
+ * ===== [ADD] 헬퍼: 파이썬 한 줄(JSON) 처리 ==============================================
+ *  - 목적: Py -> C로 들어온 한 줄(JSON 문자열)을 파싱해 ai_result에 저장하고 상태 플래그 설정
+ *  - 실패해도 치명적이지 않으므로 파싱 실패는 로깅 후 무시(프로토타입 전략)
+ * ======================================================================================= */
+static int handle_python_line(const char* line, unsigned char* state_flag, cJSON** out_ai) {
+    if (!line || !state_flag) return -1;
+
+    /* 파이썬 vision_server.py는 print(json.dumps(...)) + flush로 한 줄을 보낸다고 가정.
+       JSON 포맷이 아닐 가능성(디버그 문자열 등)이 있으므로 파싱 실패는 에러로 두지 않는다. */
+    cJSON* root = cJSON_Parse(line);
+    if (!root) {
+        /* 필요하면 fprintf(stderr, "..."); 로 남길 수 있음 */
+        return -1;
+    }
+    if (*out_ai) cJSON_Delete(*out_ai);
+    *out_ai = root;
+
+    *state_flag |= STATE_AI_RESULT_RECEIVED;   // "AI 결과 수신" 상태 완료
+    return 0;
+}
+
+// --- 3. main 함수: 모든 코드의 시작점 ---
 int main() {
     // --- 2-1. 파이프(Pipe) 생성 ---
     // 파이프는 OS 커널 내부에 생성되는 단방향 데이터 통로입니다.
@@ -70,7 +125,7 @@ int main() {
         close(python_to_c_pipe[1]);
 
         // --- 3-3. Python 스크립트의 절대 경로 동적 계산 ---
-        // "어디서 실행되든 Python 스크립트를 찾아라!"
+        // 어디에서 실행되는 파이썬 스크립트를 찾음
         char exe_path[1024];
         ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
         if (len != -1) {
@@ -99,11 +154,19 @@ int main() {
         // --- 4-1. 부모 프로세스의 파이프 및 스트림 설정 ---
         close(c_to_python_pipe[0]);
         close(python_to_c_pipe[1]);
-        FILE* stream_to_python = fdopen(c_to_python_pipe[1], "w");
-        FILE* stream_from_python = fdopen(python_to_c_pipe[0], "r");
+        pipe_from_python_fd = python_to_c_pipe[0];
+        stream_to_python = fdopen(c_to_python_pipe[1], "w");
+        stream_from_python = fdopen(pipe_from_python_fd, "r");
 
-        // --- 4-2. 비동기 I/O를 위한 파일 디스크립터(fd) 설정 ---
-        int pipe_fd = python_to_c_pipe[0];
+        /* ===== I/O 버퍼링 정책 설정 ==========================================
+         *  - to_python: 라인버퍼링으로 '\n' 마다 즉시 송신되게 함
+         *  - from_python: 시스템 기본(버퍼링 상관없음, select로 가용 데이터 확인)
+         * ========================================================================= */
+        if (stream_to_python) setvbuf(stream_to_python, NULL, _IOLBF, 0);
+
+        /* 파이썬 -> C 파이프 FD는 논블로킹으로: fgets/read가 데이터 없을 때 즉시 리턴 */
+        fcntl(pipe_from_python_fd, F_SETFL, O_NONBLOCK);
+
         //CAN 버스 초기화
         int can_fd = can_init("can0");
         if(can_fd < 0){
@@ -111,95 +174,157 @@ int main() {
             exit(EXIT_FAILURE);
         }
 
-        // [중요] select()를 위해 감시할 fd들을 논블로킹(Non-blocking) 모드로 설정합니다.
-        fcntl(pipe_fd, F_SETFL, O_NONBLOCK);
-        // if (can_fd != -1) fcntl(can_fd, F_SETFL, O_NONBLOCK);
+        // --- 4-3. 상태 관리를 위한 변수 선언 ---
+        VehicleData vehicle_data = {0}; // 차량 데이터를 저장할 구조체
+        CANMessage can_message = {0};   // CAN통신 데이터 프레임
+        cJSON* ai_result = NULL;        // AI 분석 결과를 저장할 JSON 객체
+        unsigned char state_flag = 0;   // 상태 플래그
 
-        // --- 4-3. 상태 관리(State Management)를 위한 변수 선언 ---
-        // 비동기적으로 도착하는 데이터들을 저장하고, 수신 여부를 기록하는 '상태 변수'들입니다.
-        cJSON* latest_ai_result = NULL;
-        int ai_result_received = 0;   // AI 결과 수신 깃발
-        int can_frame_received = 0;   // CAN 메시지 수신 깃발
-        int analysis_requested = 0;   // 현재 분석 요청이 진행 중인지 여부 깃발
-
-        printf("[C] Main process started in ASYNC mode. Child PID: %d\n", pid);
+        printf("[C] Main process start. Child PID: %d\n", pid);
 
         // --- 4-4. 메인 이벤트 루프: 장치의 심장 박동 ---
         while (1) {
-            // --- AI 분석 요청 단계 ---
-            // 이전 사이클이 완료되었을 때만 새로운 분석 요청을 보냅니다. (중복 요청 방지)
-            if (!analysis_requested) {
-                printf("\n[C] Sending 'analyze' command to Python.\n");
-                fprintf(stream_to_python, "analyze\n");
-                fflush(stream_to_python); // [중요] fflush: "지금 바로 보내!" 라는 명령
-                analysis_requested = 1;
-            }
-
-            // --- I/O 멀티플렉싱(select) 단계: "AI 결과나 CAN 메시지 중 뭐라도 오면 깨워줘" ---
-            fd_set read_fds;
-            FD_ZERO(&read_fds);                 // 감시 목록 초기화
-            FD_SET(pipe_fd, &read_fds);         // Python 파이프를 감시 목록에 추가
-            FD_SET(can_fd, &read_fds);          // CAN 통신 파이프를 감시 목록에 추가
-
-            //1. 두 fd중 더 큰 값을 찾아서 max_fd에 저장
-            int max_fd = (pipe_fd > can_fd) ? pipe_fd : can_fd;
-            struct timeval timeout;
-            timeout.tv_sec = 1; timeout.tv_usec = 0; // 1초간 응답 없으면 타임아웃
-            
-            // select() 함수에 "가장 큰 번호 + 1"을 전달
-            int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
-
-            if (activity < 0) { perror("select() error"); break; }
-
-            // --- 이벤트 처리 단계: "누가 연락했는지 확인하고 데이터 저장하기" ---
-            // [ Python으로부터 AI 결과가 도착했는지 확인 ]
-            if (FD_ISSET(pipe_fd, &read_fds)) {
-                char buffer[2048];
-                if (fgets(buffer, sizeof(buffer), stream_from_python) != NULL) {
-                    printf("[C] Event: AI result ARRIVED.\n");
-                    if (latest_ai_result != NULL) cJSON_Delete(latest_ai_result);
-                    latest_ai_result = cJSON_Parse(buffer);
-                    ai_result_received = 1; // AI 결과 수신 깃발 올리기
-                }
-            }
-            // [ CAN 버스에서 메시지가 도착했는지 확인 ]
-            if (FD_ISSET(can_fd, &read_fds)){
-                int result = can_receive_message(&lastest_can_frame);
-            }
-            
-            // [!!!] 테스트를 위해, 분석 요청이 나간 상태라면 CAN 메시지는 항상 받았다고 시뮬레이션
-            if (analysis_requested) {
-                 can_frame_received = 1; // CAN 메시지 수신 깃발 올리기
-            }
-
-            // --- 최종 결정 및 제어 단계: "모든 정보가 모였으니, 행동 개시!" ---
-            if (ai_result_received && can_frame_received) {
-                printf("[C] Condition Met: Both AI result and CAN frame are ready!\n");
+             // --- A. 필수 데이터 수집 및 파이썬 요청 단계 ---
+            // ai분석 요청을 하지 않았다면
+            if((state_flag & AI_REQUEST_FLAG) != AI_REQUEST_FLAG){
+                //CAN 통신으로 필수 데이터를 받지 않았다면
+                if((state_flag & AI_AVAILABLE) != AI_AVAILABLE){
                 
-                if (latest_ai_result != NULL) {
-                    printf("[C] Making final decision and controlling hardware...\n");
-                    // [ 여기에 latest_ai_result와 latest_can_frame을 조합하여 최종 제어하는 코드 삽입 ]
+                    //GPS 데이터를 받았다면
+                    if((state_flag & GPS_DATA_FLAG) == GPS_DATA_FLAG){
+                        //스티어링 데이터 요청
+                        if(can_request_pid(PID_STEERING_DATA) < 0){
+                            perror("[C] STEERING_DATA request error");
+                        }
+                    }
+                    //GPS 데이터를 받지 않았다면
+                    else if((state_flag & GPS_DATA_FLAG) != GPS_DATA_FLAG){
+                        //GPS 데이터 요청
+                        if(can_request_pid(PID_GPS_DATA) < 0){
+                            perror("[C] GPS request error");
+                        }
+                    }
+
                 }
-                
-                // 한 사이클이 끝났으므로, 다음 사이클을 위해 모든 상태 변수를 초기화합니다.
-                printf("[C] Resetting state for next cycle.\n");
-                if (latest_ai_result != NULL) {
-                    cJSON_Delete(latest_ai_result);
-                    latest_ai_result = NULL;
+                else{
+                    //여기에 파이썬 실행 코드 추가, GPS좌표와 스티어링 데이터를 넘김
+                    // ===== [ADD] 필수 두 데이터(GPS, 조향각)가 준비되면, 파이썬에 분석 명령 전송 =====
+                    if (send_ai_request(stream_to_python, &vehicle_data) == 0) {
+                        state_flag |= AI_REQUEST_FLAG;   // 중복 요청 방지
+                    } else {
+                        perror("[C] send_ai_request failed");
+                    }
                 }
-                ai_result_received = 0;
-                can_frame_received = 0;
-                analysis_requested = 0;
             }
+
+            //ai 분석 요청을 했다면
+            else{
+                //나머지 CAN 통신 요청
+                // (요구사항: AI가 돌고 있는 동안에도 CAN 수집은 계속된다)
+                // 필요시 여기에서 엔진, 속도, 브레이크, 타이어 등 추가 PID를 라운드-로빈으로 요청해도 됨.
+                // 예시(프로토타입): 속도/엔진RPM 라운드로 요청
+                // if (can_request_pid(PID_ENGINE_SPEED) < 0) perror("[C] REQ RPM");
+                // if (can_request_pid(PID_VEHICLE_SPEED) < 0) perror("[C] REQ SPEED");
+            }
+
+            // --- B. I/O 멀티플렉싱(select) 단계 ---
+            /* ===== [ADD] select()로 파이썬 파이프 + CAN 소켓을 동시에 감시 ==================
+             *  - 타임아웃: 50ms (프로토타입 기준 반응성/부하 균형)
+             *  - 준비된 FD만 비동기적으로 처리 → 한 루프에서 가능한 한 많이 소화
+             * ========================================================================= */
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(pipe_from_python_fd, &rfds);
+            FD_SET(can_fd, &rfds);
+            int maxfd = (pipe_from_python_fd > can_fd ? pipe_from_python_fd : can_fd);
+
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 50 * 1000; // 50 ms
+
+            int ready = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+            if (ready < 0) {
+                if (errno == EINTR) continue; // 신호로 깨어남(무시)
+                perror("[C] select");
+                break;
+            }
+            if (ready == 0) {
+                // 타임아웃: 주기 작업 자리(하트비트 등)
+                // continue;
+            }
+
+            // >>> 1) 파이썬 결과 수신 (라인 단위 JSON)
+            if (FD_ISSET(pipe_from_python_fd, &rfds)) {
+                /* 주의: fd는 논블로킹. stream_from_python은 stdio 버퍼를 쓰므로
+                   fgets가 즉시 NULL을 줄 수 있음(EAGAIN). 이는 '아직 한 줄이 안 채워짐' 의미 */
+                char line[4096];
+                while (fgets(line, sizeof(line), stream_from_python)) {
+                    /* vision_server.py는 결과를 한 줄 JSON으로 print하고 flush함 */
+                    handle_python_line(line, &state_flag, &ai_result);
+                    /* 파이썬이 여러 줄을 연속적으로 보낼 수 있으므로 while로 드레인 */
+                }
+
+                /* EOF(파이썬 종료) 감지 */
+                if (feof(stream_from_python)) {
+                    fprintf(stderr, "[C] Python EOF detected. Exiting.\n");
+                    break;
+                }
+                clearerr(stream_from_python); // EAGAIN 등 클리어
+            }
+
+            // >>> 2) CAN 프레임 수신 (있을 때 모두 드레인)
+            if (FD_ISSET(can_fd, &rfds)) {
+                while (1) {
+                    int r = can_receive_message(&can_message);
+                    if (r < 0) {
+                        // 심각한 소켓 에러 가능 (프로토타입: 경고만)
+                        perror("[C] can_receive_message");
+                        break;
+                    } else if (r == 0) {
+                        // 읽을 데이터 없음(논블로킹): 루프 종료
+                        break;
+                    } else {
+                        // 정상 프레임 1개 수신 → 파싱 및 상태 플래그 갱신
+                        can_parse_and_update_data(&can_message, &vehicle_data, &state_flag);
+                    }
+                }
+            }
+
+            // >>> 3) 완료 조건 체크: AI 결과 + CAN 측 “완료 세트” 충족 시 제어 로직 실행
+            /* COMPLETE_DATA_FLAG는 hardware.h에 정의된 전체 데이터 집합 플래그임.
+               (ENGINE_SPEED, VEHICLE_SPEED, GEAR_STATE, GPS, STEERING, BRAKE, TIRE 등)
+               프로토타입에서는 이 완전 세트를 만족했을 때 한 번 제어 로직을 실행하도록 구성. */
+            if ( (state_flag & STATE_AI_RESULT_RECEIVED) &&
+                 ((state_flag & COMPLETE_DATA_FLAG) == COMPLETE_DATA_FLAG) ) {
+
+                // ======= [ADD] 최종 제어 로직 트리거 지점 ===================================
+                // 예) control_decision(&vehicle_data, ai_result);
+                //     - ai_result에서 위험도/객체/권고조향/감속명령 등을 추출
+                //     - vehicle_data(실측 CAN)와 결합해 실행 정책 판단
+                // ===========================================================================
+                fprintf(stdout,
+                        "[C] CONTROL: AI+CAN 완료. speed=%d rpm=%d gear=%c gps(%.6f,%.6f) steer=%.3f\n",
+                        vehicle_data.speed, vehicle_data.rpm, vehicle_data.gear_state,
+                        vehicle_data.gps_x, vehicle_data.gps_y, vehicle_data.degree);
+                fflush(stdout);
+
+                // (정책) 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
+                state_flag &= ~(STATE_AI_RESULT_RECEIVED | AI_REQUEST_FLAG);
+                if (ai_result) { cJSON_Delete(ai_result); ai_result = NULL; }
+
+                // 필요하면 필수 두 데이터(GPS/STEER) 플래그만 리셋해서,
+                // 다시 두 데이터를 확보한 뒤 새로운 analyze 라운드를 도는 정책도 가능.
+                // 예)
+                state_flag &= ~0x00;
+            }
+
         } // --- while(1) 루프 끝 ---
 
         // --- 자원 정리 및 종료 ---
         printf("\n[C] Main process finished. Cleaning up resources.\n");
-        fclose(stream_to_python);
-        fclose(stream_from_python);
+        if (stream_to_python) fclose(stream_to_python);
+        if (stream_from_python) fclose(stream_from_python);
         if (pid > 0) waitpid(pid, NULL, 0); // 좀비 프로세스 방지
     }
     return 0;
 }
-
-//기환 테스트, git branch
