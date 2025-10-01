@@ -51,13 +51,14 @@ class GstVideoReceiver:
 
     def init_pipeline(self):
         pipeline_str = (
-            f"udpsrc port={self.port} "
-            "! application/x-rtp,media=video,encoding-name=H264,payload=96 "
-            "! rtph264depay "
-            "! avdec_h264 "
-            "! videoconvert "
-            "! video/x-raw,format=BGR "
-            "! appsink name=sink drop=true max-buffers=1 sync=false"
+            f"udpsrc port={self.port} ! "
+            "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
+            "rtpjitterbuffer latency=60 ! "
+            "rtph264depay ! h264parse config-interval=-1 ! "
+            "avdec_h264 max-threads=1 ! "
+            "videoconvert ! "
+            "video/x-raw,format=RGB ! "   # appsink에 RGB로 전달
+            "appsink name=sink drop=true max-buffers=1 sync=false"
         )
         self.pipeline = Gst.parse_launch(pipeline_str)
         self.bus      = self.pipeline.get_bus()
@@ -122,8 +123,17 @@ class GstVideoReceiver:
         self._stop = True
         if self._thread:
             self._thread.join()
+            self._thread = None
+
         if self.is_initialized and self.pipeline:
+            # 상태 NULL로 전환
             self.pipeline.set_state(Gst.State.NULL)
+            # 전환 완료 대기 (중요)
+            self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+            # 레퍼런스 정리
+            self.appsink = None
+            self.bus = None
+            self.pipeline = None
             self.is_initialized = False
 
 # LDH GstVideoReceiver class 선언 끝
@@ -171,10 +181,24 @@ class DisplayRGB:
         self.appsrc.emit("push-buffer", buf)
 
     def close(self):
-        if self.pipeline:
+        if not self.pipeline:
+            return
+        try:
+            # 먼저 EOS로 파이프라인에 종료를 알림 (권장)
+            try:
+                self.appsrc.end_of_stream()
+            except Exception:
+                pass
+            # NULL 전이
             self.pipeline.set_state(Gst.State.NULL)
-            self.pipeline = self.appsrc = self.bus = None
+            self.pipeline.get_state(Gst.CLOCK_TIME_NONE)
+        finally:
+            self.appsrc = None
+            self.bus = None
+            self.pipeline = None
 # LDH DisplayRGB class 선언 끝
+
+# LDH imsi로 띄워줄거 시간이이된다면 Map할때 수정될 것 
 def tile_grid_rgb(frames, rows=ROWS, cols=COLS, tile_w=TILE_W, tile_h=TILE_H):
     total = rows * cols
     padded = list(frames)[:total]
@@ -192,6 +216,46 @@ def tile_grid_rgb(frames, rows=ROWS, cols=COLS, tile_w=TILE_W, tile_h=TILE_H):
             idx += 1
         tiles.append(np.hstack(row_imgs))
     return np.vstack(tiles)  # RGB
+
+# ---------------------------LDH model input 을 위한 복사 및 변환 시작
+def resize_with_letterbox(img, target_w=800, target_h=320):
+    h, w = img.shape[:2]
+    scale = min(target_w / w, target_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+
+    resized = cv2.resize(img, (new_w, new_h))
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    top = (target_h - new_h) // 2
+    left = (target_w - new_w) // 2
+    canvas[top:top+new_h, left:left+new_w] = resized
+    return canvas
+
+def normalize_imagenet(img):
+    img = img.astype(np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    img = (img - mean) / std
+    return img
+
+def copy_for_model(displayFrames, target_w=800, target_h=320):
+    processed = []
+    for img in displayFrames:  # (H, W, 3) 이미지 여러 장
+        # 1. resize + letterbox
+        img_proc = resize_with_letterbox(img, target_w, target_h)
+        # 2. normalize
+        img_proc = normalize_imagenet(img_proc)
+        # 3. HWC → CHW
+        img_proc = np.transpose(img_proc, (2, 0, 1))
+        processed.append(img_proc)
+
+    # (6, 3, 320, 800)
+    modelFrames = np.stack(processed, axis=0)
+    # (1, 6, 3, 320, 800) → batch 차원 추가
+    modelFrames = np.expand_dims(modelFrames, axis=0)
+    return modelFrames
+
+# ---------------------------LDH model input 을 위한 복사 및 변환 끝
+
 
 def log(message):
     """디버깅 메시지를 표준 에러(stderr)로 출력하는 함수. C로 가는 데이터(stdout)와 섞이지 않게 함."""
@@ -261,7 +325,8 @@ def main():
         while True:
             # sys.stdin.readline()은 C에서 명령을 보낼 때까지 여기서 실행을 멈추고 대기합니다.
             # 이것이 이 스크립트의 기본 '대기 상태'입니다.
-            command = sys.stdin.readline()
+            #command = sys.stdin.readline()
+            command = "analyze"
             if not command:
                 log("C process closed the pipe. Exiting.")
                 break
@@ -270,20 +335,23 @@ def main():
             
             if "analyze" in command.strip():
                 #frame = get_single_frame(appsink)
-                frames = [] #이미지 넣을 리스트
+                displayFrames = [] #이미지 넣을 리스트
+                modelFrames = []
+                displayFrames = [r.latest_frame for r in receivers]   # 각 프레임: RGB 또는 None
+                displayFrames = np.array(displayFrames)  # numpy 형태여야 shape도 가능함
+                #frames = np.transpose(frames, (0, 3, 1, 2)) 
+                modelFrames = copy_for_model(displayFrames)# 1,6,3,320,800로 변환 될것임
 
-                frames = [r.latest_frame for r in receivers]   # 각 프레임: RGB 또는 None
-                frames = np.array(frames)  # numpy 형태여야 shape도 가능함
-                grid   = tile_grid_rgb(frames, ROWS, COLS, TILE_W, TILE_H)  # RGB
+                grid   = tile_grid_rgb(displayFrames, ROWS, COLS, TILE_W, TILE_H)  # RGB
 
                 grid = cv2.resize(grid, (OUT_W, OUT_H), interpolation=cv2.INTER_LINEAR)
 
                 display.push_rgb(grid)  # RGB 그대로 출력 imsi UI나중에 만들어지면 그때 다시
 
-                if frames is not None:
+                if modelFrames is not None:
                     # [ 여기에 실제 AI 모델 추론 코드를 삽입합니다. ]
-                    ai_result = {"status": "success", "frame_shape": frames.shape}
-                    log(f"Frame analysis complete. Shape: {frames.shape}")
+                    ai_result = {"status": "success", "frame_shape": modelFrames.shape}
+                    log(f"Frame analysis complete. Shape: {modelFrames.shape}")
                 else:
                     ai_result = {"status": "fail", "reason": "Could not get frame from GStreamer"}
                     log("Frame analysis failed.")
@@ -301,6 +369,9 @@ def main():
         # pipeline.set_state(Gst.State.NULL)
         for r in receivers:
             r.stop()
+        
+        if display:
+            display.close()    
         cv2.destroyAllWindows()
         log("Pipeline stopped. Script finished.")
 
