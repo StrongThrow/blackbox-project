@@ -239,21 +239,17 @@ def normalize_imagenet(img):
 
 def copy_for_model(displayFrames, target_w=800, target_h=320):
     processed = []
-    for img in displayFrames:  # (H, W, 3) 이미지 여러 장
-        # 1. resize + letterbox
+    for img in displayFrames:
+        if img is None:
+            img = np.zeros((target_h, target_w, 3), dtype=np.uint8)  # 빈 화면 대체
         img_proc = resize_with_letterbox(img, target_w, target_h)
-        # 2. normalize
         img_proc = normalize_imagenet(img_proc)
-        # 3. HWC → CHW
         img_proc = np.transpose(img_proc, (2, 0, 1))
         processed.append(img_proc)
 
-    # (6, 3, 320, 800)
     modelFrames = np.stack(processed, axis=0)
-    # (1, 6, 3, 320, 800) → batch 차원 추가
     modelFrames = np.expand_dims(modelFrames, axis=0)
     return modelFrames
-
 # ---------------------------LDH model input 을 위한 복사 및 변환 끝
 
 
@@ -325,8 +321,8 @@ def main():
         while True:
             # sys.stdin.readline()은 C에서 명령을 보낼 때까지 여기서 실행을 멈추고 대기합니다.
             # 이것이 이 스크립트의 기본 '대기 상태'입니다.
-            command = sys.stdin.readline()
-            
+            #command = sys.stdin.readline()
+            command = "analyze"
             if not command:
                 log("C process closed the pipe. Exiting.")
                 break
@@ -338,6 +334,12 @@ def main():
                 displayFrames = [] #이미지 넣을 리스트
                 modelFrames = []
                 displayFrames = [r.latest_frame for r in receivers]   # 각 프레임: RGB 또는 None
+                
+                for i in range(len(displayFrames)):
+                    if displayFrames[i] is None:
+                        displayFrames[i] = np.zeros((SRC_H, SRC_W, 3), dtype=np.uint8)
+                    else:
+                        displayFrames[i] = cv2.cvtColor(displayFrames[i], cv2.COLOR_BGR2RGB)
                 displayFrames = np.array(displayFrames)  # numpy 형태여야 shape도 가능함
                 #frames = np.transpose(frames, (0, 3, 1, 2)) 
                 modelFrames = copy_for_model(displayFrames)# 1,6,3,320,800로 변환 될것임
