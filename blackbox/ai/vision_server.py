@@ -325,8 +325,8 @@ def main():
         while True:
             # sys.stdin.readline()은 C에서 명령을 보낼 때까지 여기서 실행을 멈추고 대기합니다.
             # 이것이 이 스크립트의 기본 '대기 상태'입니다.
-            #command = sys.stdin.readline()
-            command = "analyze"
+            command = sys.stdin.readline()
+            
             if not command:
                 log("C process closed the pipe. Exiting.")
                 break
