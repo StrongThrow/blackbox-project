@@ -449,9 +449,10 @@ def main():
 
                     # STEER (0x20) : I,F (정수/소수; 수신기는 I + F/100로 해석)
                     steer_x100 = int(round(steer_deg * 100))
-                    I = (abs(steer_x100) // 100) & 0xFF
-                    F = (abs(steer_x100) % 100) & 0xFF
-                    send_pid_frame(ser, PID_STEER, bytes([I, F]))
+                    S = 1 if steer_deg >= 0 else 0
+                    I = min(255, abs(steer_x100)//100)
+                    F = min(99,  abs(steer_x100)%100)
+                    send_pid_frame(ser, PID_STEER, bytes([S, I, F]))
 
                     # BRAKE (0x40) : 0/1
                     brk_on = 1 if brk > 0 else 0
