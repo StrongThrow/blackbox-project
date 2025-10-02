@@ -2,19 +2,15 @@
 # -*- coding: utf-8 -*-
 
 '''
-    calra + gstreaming + can통신
+    carla + gstreaming + CAN/Serial
 
-   python3 fast_hero_sender.py \
-  --town Town03 --follow \
-  --hero-speed 160 --hero-dist 1.0 --hero-lane-change \
-  --num-traffic 50 \
-  --serial /dev/ttyACM0 --baud 115200 \
-  --pi-ip 10.10.14.33 --base-port 5000
-    
-    - hero-speed 160 : 차량 제한 속도의 160%로 주행
-    - num-traffic 50 : 기본 배경자 수 50대
-    - hero-dist 1.0 : 앞차와의 목표 거리(m), 작을수록 과감 (기본 1.0m)
-    - hero-lane-change : 차선 변경 허용(기본허용)
+    예시 실행:
+      python3 fast_hero_sender.py \
+        --town Town03 --follow \
+        --hero-speed 160 --hero-dist 1.0 --hero-lane-change \
+        --num-traffic 50 \
+        --serial /dev/ttyACM0 --baud 115200 \
+        --pi-ip 10.10.14.88 --base-port 5000
 '''
 
 import sys, os, glob, time, math, argparse, random, struct
@@ -50,32 +46,48 @@ except Exception:
 import carla
 
 # =========================
-# Config (기본값)
+# Config
 # =========================
-PI_IP = "10.10.14.33"
+PI_IP = "10.10.14.88"
 WIDTH, HEIGHT, FPS = 800, 320, 15  # 각 카메라 해상도/프레임
-
-# GStreamer 초기화 (전역 1회)
 Gst.init(None)
 
 # =========================
-# 프로토콜 (히어로 차량 상태 V1)
+# PID (프로젝트 합의)
 # =========================
-STX0, STX1 = 0xAA, 0x55
-MSG_VEH_STATUS = 0x01  # <HhBBBB> (speed0.1, steer0.1, thr, brk, gear, flags)
+PID_RPM       = 0x0C
+PID_SPEED     = 0x0D
+PID_GEAR      = 0xA4
+PID_GPS_X     = 0x10   # CARLA 월드 X (m) → 시리얼로 float32(LE) 전송
+PID_GPS_Y     = 0x11   # CARLA 월드 Y (m) → 시리얼로 float32(LE) 전송
+PID_STEER     = 0x20
+PID_BRAKE     = 0x40
+PID_TIRE      = 0x80
 
-def crc8_xor(bs: bytes) -> int:
+# =========================
+# 시리얼 프레임 (PC -> 아두이노: PID 값 업데이트)
+# 프레임 = [AA][55][90][LEN][PID][VALUE...][CRC8(XOR)]
+# LEN = len([PID]+[VALUE...])
+# =========================
+SER_STX0, SER_STX1 = 0xAA, 0x55
+SER_MSG_PID_UPDATE = 0x90
+
+def _crc8_xor(bs: bytes) -> int:
     c = 0
     for b in bs: c ^= b
     return c & 0xFF
 
-def pack_payload(speed01: int, steer01: int, thr: int, brk: int, gear: int, flags: int) -> bytes:
-    return struct.pack('<HhBBBB', speed01, steer01, thr, brk, gear, flags)
+def send_pid_frame(ser, pid: int, value_payload: bytes):
+    if not ser:
+        return
+    body = bytes([pid & 0xFF]) + value_payload
+    head = bytes([SER_STX0, SER_STX1, SER_MSG_PID_UPDATE, len(body) & 0xFF])
+    frame = head + body + bytes([_crc8_xor(head + body)])
+    ser.write(frame)
 
-def build_frame(payload: bytes) -> bytes:
-    head = bytes([STX0, STX1, MSG_VEH_STATUS, len(payload)])
-    return head + payload + bytes([crc8_xor(head + payload)])
-
+# =========================
+# 유틸
+# =========================
 def kph(v: carla.Vector3D) -> float:
     return 3.6 * math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
 
@@ -100,7 +112,7 @@ class CarlaCameraManager:
         cam_bp.set_attribute("sensor_tick", str(1.0 / self.fps))
 
         positions = [
-            ( 2.5 ,  0.0, 0.7, 0,    0,   0),  # front (12시) - FOV 70
+            ( 2.5 ,  0.0, 0.7, 0,    0,   0),  # front (12시)
             ( 2.5 ,  0.5, 0.7, 0,   30,   0),  # 2시
             ( 2.5 , -0.5, 0.7, 0,  -30,   0),  # 10시
             (-2.5 ,  0.0, 0.7, 0,  180,   0),  # rear (6시)
@@ -221,7 +233,7 @@ def spawn_traffic(world: carla.World, n: int, seed: int = 42):
 # 메인
 # =========================
 def main():
-    ap = argparse.ArgumentParser(description="CARLA 6뷰 스트리밍 + 히어로 고속 주행(속도 유지) + 히어로 상태 송신")
+    ap = argparse.ArgumentParser(description="CARLA 6뷰 스트리밍 + 히어로 고속 주행(속도 유지) + PID값 시리얼 송신")
     # CARLA 접속/월드
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=2000)
@@ -232,21 +244,17 @@ def main():
     ap.add_argument('--hero-filter', default='vehicle.*model3*')
     ap.add_argument('--hero-color', default='255,0,0')
 
-    # 🚀 히어로 목표 속도 (% of speed limit). 150 = 제한속도 150%
+    # 히어로 목표 속도(% of speed limit)
     ap.add_argument('--hero-speed', type=float, default=150.0)
-    # 🔧 히어로 추종 거리(m): 작을수록 앞차에 덜 막힘
     ap.add_argument('--hero-dist', type=float, default=1.0)
-    # 🔀 히어로 차선 변경 허용
     ap.add_argument('--hero-lane-change', action='store_true', default=True)
 
-    # 배경차 대수 (기본 50대)
-    ap.add_argument('--num-traffic', type=int, default=50, help='배경차 대수(히어로 제외)')
-
-    # 배경차 감속(%) 필요시만 (0이면 제한속도 그대로)
+    # 배경차 대수
+    ap.add_argument('--num-traffic', type=int, default=50)
     ap.add_argument('--traffic-slowdown', type=float, default=0.0)
 
     ap.add_argument('--destroy-others', action='store_true')
-    ap.add_argument('--follow', action='store_true', help='간단 3인칭 추적 카메라')
+    ap.add_argument('--follow', action='store_true')
 
     # GStreamer/네트워크
     ap.add_argument('--pi-ip', default=PI_IP)
@@ -256,10 +264,10 @@ def main():
     ap.add_argument('--serial', default='', help='/dev/ttyACM0 (비우면 전송X)')
     ap.add_argument('--baud', type=int, default=115200)
 
-    # CAN 옵션 (히어로만 전송)
-    ap.add_argument('--can', action='store_true', help='CAN 송신 활성화(socketcan)')
-    ap.add_argument('--can-channel', default='can0', help='예: can0 / vcan0')
-    ap.add_argument('--can-id', type=lambda x: int(x, 0), default=0x100, help='히어로 V1용 0x100 (0x.. 허용)')
+    # CAN 옵션 (필요 시)
+    ap.add_argument('--can', action='store_true')
+    ap.add_argument('--can-channel', default='can0')
+    ap.add_argument('--can-id', type=lambda x: int(x, 0), default=0x100)
 
     args = ap.parse_args()
 
@@ -328,7 +336,7 @@ def main():
             try: tm.set_synchronous_mode(False)
             except: pass
             world.apply_settings(original)
-            if ser: 
+            if ser:
                 try: ser.close()
                 except: pass
             if bus:
@@ -340,20 +348,15 @@ def main():
     world.tick()
 
     # ===== Traffic Manager 설정 =====
-    # 히어로 목표속도(%): TM은 "speed difference(%)"를 받으므로 diff = 100 - hero_speed
-    hero_speed = max(10.0, min(300.0, float(args.hero_speed)))  # 10%~300% 가드
-    diff_hero = 100.0 - hero_speed   # 150% → -50 (더 빠르게)
+    hero_speed = max(10.0, min(300.0, float(args.hero_speed)))
+    diff_hero = 100.0 - hero_speed
 
-    # 히어로: 신호/표지 준수(원하면 100으로 바꿔 무시 가능)
     tm.ignore_lights_percentage(hero, 0)
     tm.ignore_signs_percentage(hero, 0)
-
-    # 히어로: 목표 속도/차간거리/차선변경
     tm.vehicle_percentage_speed_difference(hero, diff_hero)
     try:
-        tm.set_distance_to_leading_vehicle(hero, max(0.5, float(args.hero_dist)))  # m
+        tm.set_distance_to_leading_vehicle(hero, max(0.5, float(args.hero_dist)))
     except Exception:
-        # 일부 버전에선 개별 API 없고 글로벌만 있을 수 있어요
         try:
             tm.set_global_distance_to_leading_vehicle(max(0.5, float(args.hero_dist)))
         except Exception:
@@ -365,7 +368,6 @@ def main():
 
     hero.set_autopilot(True, tm.get_port())
 
-    # 배경차: 필요시 감속만 적용(기본 0%)
     for v in traffic:
         try:
             tm.ignore_lights_percentage(v, 0)
@@ -402,38 +404,79 @@ def main():
                     carla.Transform(tf.location + back, carla.Rotation(pitch=-10.0, yaw=yaw))
                 )
 
-            # --- 히어로 상태 수집 & 로그/송신 ---
+            # --- 히어로 상태 수집 ---
             vel = hero.get_velocity()
             ctrl = hero.get_control()
 
-            spd = kph(vel)
-            steer_deg = float(ctrl.steer) * 30.0
+            spd = kph(vel)                               # km/h
+            steer_deg = float(ctrl.steer) * 30.0         # -30 ~ +30 (예시)
             thr = int(max(0.0, min(1.0, ctrl.throttle)) * 100)
             brk = int(max(0.0, min(1.0, ctrl.brake)) * 100)
-            gear_map = {0:0, 1:1, -1:2}
+            gear_map = {0:0, 1:1, -1:2}                  # 0:P, 1:D(or 1단), 2:R
             gear = gear_map.get(ctrl.gear, 0)
             flags = 1 if getattr(hero, 'is_autopilot_enabled', False) else 0
 
-            print(f"SPD={spd:6.2f} kph  STR={steer_deg:6.2f} deg  THR={thr:3d}%  BRK={brk:3d}%  G={gear}  FLG=0x{flags:02X}")
+            # --- 히어로 위치 (CARLA 월드 좌표, 단위: m) ---
+            pos = hero.get_transform().location
+            x_m = float(pos.x)
+            y_m = float(pos.y)
 
-            # 시리얼 전송 (히어로만, V1)
+            print(f"SPD={spd:6.2f} kph  STR={steer_deg:6.2f} deg  THR={thr:3d}%  BRK={brk:3d}%  "
+                  f"G={gear}  X={x_m:.6f}  Y={y_m:.6f}  FLG=0x{flags:02X}")
+
+            # --- 시리얼로 PID별 업데이트 푸시 (아두이노가 이 값으로 0x7E8 응답 작성) ---
             if ser:
-                speed01 = int(round(spd * 10))
-                steer01 = int(round(steer_deg * 10))
-                payload = pack_payload(speed01, steer01, thr, brk, gear, flags)
-                frame_bytes = build_frame(payload)
                 try:
-                    ser.write(frame_bytes)
+                    # SPEED (0x0D) : 1B = km/h 정수
+                    speed_u8 = max(0, min(255, int(round(spd))))
+                    send_pid_frame(ser, PID_SPEED, struct.pack('<B', speed_u8))
+
+                    # RPM (0x0C) : A,B = rpm*4 (빅엔디안 → 응답에서 (A*256+B)/4)
+                    rpm_est = max(0, min(16383, int(round(spd * 40))))  # 간단 추정치. 실제 모델 있으면 교체
+                    rpm_x4 = rpm_est * 4
+                    send_pid_frame(ser, PID_RPM, struct.pack('>H', rpm_x4))
+
+                    # GEAR (0xA4) : A,B=ratio_x1000(BE), C=gear_code 상위니블
+                    ratio_x1000 = 0  # 현재 기어비 사용 안함 → 0 전송
+                    A = (ratio_x1000 >> 8) & 0xFF
+                    B = ratio_x1000 & 0xFF
+                    C = (gear & 0x0F) << 4
+                    send_pid_frame(ser, PID_GEAR, bytes([A, B, C]))
+
+                    # ✅ GPS_X/GPS_Y: 이제 float32(LE, meters)로 전송 (아두이노가 S/I/D2/D4/D6로 변환)
+                    send_pid_frame(ser, PID_GPS_X, struct.pack('<f', x_m))
+                    send_pid_frame(ser, PID_GPS_Y, struct.pack('<f', y_m))
+
+                    # STEER (0x20) : I,F (정수/소수; 수신기는 I + F/100로 해석)
+                    steer_x100 = int(round(steer_deg * 100))
+                    I = (abs(steer_x100) // 100) & 0xFF
+                    F = (abs(steer_x100) % 100) & 0xFF
+                    send_pid_frame(ser, PID_STEER, bytes([I, F]))
+
+                    # BRAKE (0x40) : 0/1
+                    brk_on = 1 if brk > 0 else 0
+                    send_pid_frame(ser, PID_BRAKE, struct.pack('<B', brk_on))
+
+                    # TIRE (0x80) : 4B kPa 정수 (FL,FR,RL,RR)
+                    tp = [230, 230, 235, 240]  # 예시값
+                    tps = [max(0, min(255, int(x))) for x in tp]
+                    send_pid_frame(ser, PID_TIRE, struct.pack('<BBBB', *tps))
+
                     ser.flush()
                 except Exception as e:
                     print(f"[WARN] Serial write failed: {e}")
 
-            # CAN 전송 (히어로만)
+            # --- (옵션) CAN으로도 무언가 보낼 필요가 있으면 여기서 전송 ---
             if bus:
                 try:
-                    speed01 = int(round(spd * 10))
-                    steer01 = int(round(steer_deg * 10))
-                    payload = pack_payload(speed01, steer01, thr, brk, gear, flags)
+                    payload = struct.pack('<HhBBBB',
+                        int(round(spd * 10)),             # speed0.1
+                        int(round(steer_deg * 10)),        # steer0.1
+                        int(max(0, min(100, thr))),        # thr(%)
+                        int(max(0, min(100, brk))),        # brk(%)
+                        int(gear) & 0xFF,                  # gear code
+                        int(flags) & 0xFF                  # flags
+                    )
                     msg = can.Message(arbitration_id=args.can_id, data=payload, is_extended_id=False)  # type: ignore
                     bus.send(msg)  # type: ignore
                 except Exception as e:
