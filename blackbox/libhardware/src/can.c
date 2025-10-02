@@ -208,11 +208,20 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
             *flag |= GEAR_STATE_FLAG;
             break;
         
-        case PID_GPS_DATA:
-            vehicle_data->gps_x = (float)msg->data[3] + (float)msg->data[4] /100;
-            vehicle_data->gps_y = (float)msg->data[5] + (float)msg->data[6] /100;
-            *flag |= GPS_DATA_FLAG;
+        case PID_GPS_XDATA:
+            double temp = 0.0;
+            temp = (double)data[4] + (double)data[5] / 100 + (double)data[6] / 10000 + (double)data[7];
+            vehicle_data->gps_x = (data[3] > 1) ? temp : -temp;
+            *flag |= GPS_XDATA_FLAG;
             break;
+
+        case PID_GPS_YDATA:
+            double temp = 0.0;
+            temp = (double)data[4] + (double)data[5] / 100 + (double)data[6] / 10000 + (double)data[7];
+            vehicle_data->gps_y = (data[3] > 1) ? temp : -temp;
+            *flag |= GPS_YDATA_FLAG;
+            break;
+
 
         case PID_STEERING_DATA:
             vehicle_data->degree = (float)(msg->data[3]) + (float)msg->data[4];

@@ -179,6 +179,7 @@ int main() {
         CANMessage can_message = {0};   // CAN통신 데이터 프레임
         cJSON* ai_result = NULL;        // AI 분석 결과를 저장할 JSON 객체
         unsigned char state_flag = 0;   // 상태 플래그
+        unsigned char ai_state_flag = 0;// AI 분석 결과 플래그
 
         printf("[C] Main process start. Child PID: %d\n", pid);
 
@@ -186,10 +187,27 @@ int main() {
         while (1) {
              // --- A. 필수 데이터 수집 및 파이썬 요청 단계 ---
             // ai분석 요청을 하지 않았다면
-            if((state_flag & AI_REQUEST_FLAG) != AI_REQUEST_FLAG){
+            if((ai_state_flag & AI_REQUEST_FLAG) != AI_REQUEST_FLAG){
                 //CAN 통신으로 필수 데이터를 받지 않았다면
                 if((state_flag & AI_AVAILABLE) != AI_AVAILABLE){
                 
+                    //GPS 데이터를 받지 않았다면
+                    if((state_flag & GPS_AVAILABLE) != GPS_AVAILABLE){
+                        //X좌표 데이터를 받지 않았다면
+                        if((state_flag & PID_GPS_XDATA) != PID_GPS_XDATA){
+                            //X좌표 데이터 요청
+                            if(can_request_pid(PID_STEERING_DATA) < 0){
+                                perror("[C] STEERING_DATA request error");
+                            }
+                        }
+                        //x좌표 데이터를 받았다면
+                        else{
+                            if(can_request_pid(PID_STEERING_DATA) < 0){
+                                perror("[C] STEERING_DATA request error");
+                            }
+                        }
+                    }
+                    
                     //GPS 데이터를 받았다면
                     if((state_flag & GPS_DATA_FLAG) == GPS_DATA_FLAG){
                         //스티어링 데이터 요청
