@@ -229,7 +229,7 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
 
         case PID_STEERING_DATA:
             degree = (float)msg->data[4] + ((float)msg->data[5]) / 100.0f;
-            vehicle_data->degree = (data[3] == 1) ? degree : -degree;
+            vehicle_data->degree = (msg->data[3] == 1) ? degree : -degree;
             *flag |= STEERING_DATA_FLAG;
             break;
         
