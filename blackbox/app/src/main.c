@@ -357,7 +357,7 @@ int main() {
                 fflush(stdout);
 
                 // (정책) 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
-                state_flag &= ~(GPS_XDATA_FLAG | GPS_YDATA_FLAG | STEERING_DATA_FLAG);
+                state_flag = 0;
                 ai_state_flag = 0;
                 if (ai_result) { cJSON_Delete(ai_result); ai_result = NULL; }
 
