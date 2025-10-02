@@ -173,6 +173,7 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
     // 3. 이 응답이 어떤 PID에 대한 것인지 확인합니다.
     unsigned char responded_pid = msg->data[2];
     double temp = 0.0;
+    float degree = 0.0;
 
     // 4. switch 문을 통해 PID에 맞는 파싱 로직을 수행합니다.
     switch (responded_pid) {
@@ -227,7 +228,8 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
             break;
 
         case PID_STEERING_DATA:
-            vehicle_data->degree = (float)msg->data[3] + ((float)msg->data[4]) / 100.0f;
+            degree = (float)msg->data[4] + ((float)msg->data[5]) / 100.0f;
+            vehicle_data->degree = (data[3] == 1) ? degree : -degree;
             *flag |= STEERING_DATA_FLAG;
             break;
         
