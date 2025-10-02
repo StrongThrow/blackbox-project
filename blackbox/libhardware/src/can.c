@@ -172,12 +172,14 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
 
     // 3. 이 응답이 어떤 PID에 대한 것인지 확인합니다.
     unsigned char responded_pid = msg->data[2];
+    double temp = 0.0;
 
     // 4. switch 문을 통해 PID에 맞는 파싱 로직을 수행합니다.
     switch (responded_pid) {
         case PID_VEHICLE_SPEED:
             // 차량 속도(PID 0x0D)의 계산식: 값 A
             vehicle_data->speed = msg->data[3];
+            printf("\n[C] CAN received, PID : %x, vale: %d\n", PID_VEHICLE_SPEED, vehicle_data->speed);
             *flag |= VEHICLE_SPEED_FLAG; // '속도 수신 완료' 깃발 설정
             break; // switch 문 탈출
 
@@ -191,40 +193,41 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
             vehicle_data->gear_ratio = ((float)(msg->data[3] * 256 + msg->data[4])) / 1000.0;
             
             switch(((msg->data[5] >> 4) & 0x0F)){
+                //case 0x00: vehicle_data->gear_state = 'P'; break;
+                //case 0x01: vehicle_data->gear_state = 'R'; break;
+                //case 0x02: vehicle_data->gear_state = 'N'; break;
+                //case 0x03: vehicle_data->gear_state = 'D'; break;
+                //case 0x04: vehicle_data->gear_state = '1'; break;
+                //case 0x05: vehicle_data->gear_state = '2'; break;
+                //case 0x06: vehicle_data->gear_state = '3'; break;
+                //case 0x07: vehicle_data->gear_state = '4'; break;
+                //case 0x08: vehicle_data->gear_state = '5'; break;
+                //case 0x09: vehicle_data->gear_state = '6'; break;
+                //default:vehicle_data->gear_state = '?'; break;
                 case 0x00: vehicle_data->gear_state = 'P'; break;
-                case 0x01: vehicle_data->gear_state = 'R'; break;
-                case 0x02: vehicle_data->gear_state = 'N'; break;
-                case 0x03: vehicle_data->gear_state = 'D'; break;
-                case 0x04: vehicle_data->gear_state = '1'; break;
-                case 0x05: vehicle_data->gear_state = '2'; break;
-                case 0x06: vehicle_data->gear_state = '3'; break;
-                case 0x07: vehicle_data->gear_state = '4'; break;
-                case 0x08: vehicle_data->gear_state = '5'; break;
-                case 0x09: vehicle_data->gear_state = '6'; break;
+                case 0x01: vehicle_data->gear_state = 'D'; break; 
+                case 0x02: vehicle_data->gear_state = 'R'; break;  
+                default:   vehicle_data->gear_state = '?'; break;
 
-                default:vehicle_data->gear_state = '?'; break;
             }
 
             *flag |= GEAR_STATE_FLAG;
             break;
         
         case PID_GPS_XDATA:
-            double temp = 0.0;
-            temp = (double)data[4] + (double)data[5] / 100 + (double)data[6] / 10000 + (double)data[7];
-            vehicle_data->gps_x = (data[3] > 1) ? temp : -temp;
+            temp = (double)msg->data[4] + (double)msg->data[5] / 100 + (double)msg->data[6] / 10000 + (double)msg->data[7] / 1000000;
+            vehicle_data->gps_x = (msg->data[3] != 0) ? temp : -temp;
             *flag |= GPS_XDATA_FLAG;
             break;
 
         case PID_GPS_YDATA:
-            double temp = 0.0;
-            temp = (double)data[4] + (double)data[5] / 100 + (double)data[6] / 10000 + (double)data[7];
-            vehicle_data->gps_y = (data[3] > 1) ? temp : -temp;
+            temp = (double)msg->data[4] + (double)msg->data[5] / 100 + (double)msg->data[6] / 10000 + (double)msg->data[7] / 1000000;
+            vehicle_data->gps_y = (msg->data[3] != 0) ? temp : -temp;
             *flag |= GPS_YDATA_FLAG;
             break;
 
-
         case PID_STEERING_DATA:
-            vehicle_data->degree = (float)(msg->data[3]) + (float)msg->data[4];
+            vehicle_data->degree = (float)msg->data[3] + ((float)msg->data[4]) / 100.0f;
             *flag |= STEERING_DATA_FLAG;
             break;
         
