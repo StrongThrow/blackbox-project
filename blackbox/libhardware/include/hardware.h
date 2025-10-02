@@ -26,11 +26,19 @@ extern "C" {
 #define BRAKE_DATA_FLAG             0x40
 #define TIRE_DATA_FLAG              0x80
 
+typedef struct{
+    unsigned char pid; // 요청할 PID
+    unsigned char flag; //PID 응답 저장 플래그
+}CANRequest;
+
 #define AI_REQUEST_FLAG             0x01
 
 #define GPS_AVAILABLE               (GPS_XDATA_FLAG|GPS_YDATA_FLAG)
 #define AI_AVAILABLE                (GPS_XDATA_FLAG|GPS_YDATA_FLAG|STEERING_DATA_FLAG)
-#define COMPLETE_DATA_FLAG          (ENGINE_SPEED_FLAG|VEHICLE_SPEED_FLAG|GEAR_STATE_FLAG|GPS_DATA_FLAG|STEERING_DATA_FLAG|BRAKE_DATA_FLAG|TIRE_DATA_FLAG)
+#define COMPLETE_DATA_FLAG          (ENGINE_SPEED_FLAG|VEHICLE_SPEED_FLAG|GEAR_STATE_FLAG|GPS_XDATA_FLAG|GPS_YDATA_FLAG|STEERING_DATA_FLAG|BRAKE_DATA_FLAG|TIRE_DATA_FLAG)
+#define DATA_AVAILABLE              (COMPLETE_DATA_FLAG & (~AI_AVAILABLE))
+
+
 
 // ================= 2. 카메라 API =================
 typedef struct {

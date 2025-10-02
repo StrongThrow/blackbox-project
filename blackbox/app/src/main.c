@@ -40,10 +40,18 @@ static FILE* stream_to_python = NULL;
 static FILE* stream_from_python = NULL;
 static int pipe_from_python_fd = -1;
 
-#define STATE_AI_RESULT_RECEIVED    0x01
-#define STATE_SPEED_RECEIVED        0x02
-#define STATE_RPM_RECEIVED          0x04
-#define COMPLITE_GET_DATA   (0x01|0x02|0x04)
+//요청할 PID와 완료 조건을 짝지어 목록으로 정의함
+static const CANRequest pids_to_request[] ={
+    {PID_ENGINE_SPEED, ENGINE_SPEED_FLAG},
+    {PID_VEHICLE_SPEED, VEHICLE_SPEED_FLAG},
+    {PID_GEAR_STATE, GEAR_STATE_FLAG},
+    {PID_BRAKE_DATA, BRAKE_DATA_FLAG},
+    {PID_TIRE_DATA, TIRE_DATA_FLAG}
+};
+//확인할 PID의 갯수
+static const unsigned char num_pids_to_request = sizeof(pids_to_request) / sizeof(pids_to_request[0]);
+//다음에 확인할 PID의 인덱스를 저장할 변수
+static unsigned char next_pid_index = 0;
 
 /* =======================================================================================
  * ===== [ADD] 헬퍼: 파이썬 analyze 요청 라인 프로토콜 전송 (GPS/STEER 포함) ==================
@@ -54,10 +62,9 @@ static int pipe_from_python_fd = -1;
 static int send_ai_request(FILE* to_py, const VehicleData* v) {
     if (!to_py || !v) return -1;
 
-    /* JSON에 부동소수점 수치를 넣을 때는 소수점 자릿수를 제한하여
-       (1) 불필요한 문자열 길이를 줄이고 (2) 파이썬측 파싱 안정성을 확보한다. */
+    /* JSON에 부동소수점 수치를 넣음 */
     int n = fprintf(to_py,
-                    "analyze {\"gps\":[%.2f,%.2f],\"steer\":%.2f}\n",
+                    "analyze {\"gps\":[%.6f,%.6f],\"steer\":%.2f}\n",
                     v->gps_x, v->gps_y, v->degree);
     if (n <= 0) return -1;
 
@@ -84,7 +91,7 @@ static int handle_python_line(const char* line, unsigned char* state_flag, cJSON
     if (*out_ai) cJSON_Delete(*out_ai);
     *out_ai = root;
 
-    *state_flag |= STATE_AI_RESULT_RECEIVED;   // "AI 결과 수신" 상태 완료
+    *state_flag |= AI_REQUEST_FLAG;   // "AI 결과 수신" 상태 완료
     return 0;
 }
 
@@ -194,41 +201,37 @@ int main() {
                     //GPS 데이터를 받지 않았다면
                     if((state_flag & GPS_AVAILABLE) != GPS_AVAILABLE){
                         //X좌표 데이터를 받지 않았다면
-                        if((state_flag & PID_GPS_XDATA) != PID_GPS_XDATA){
+                        if((state_flag & GPS_XDATA_FLAG) != GPS_XDATA_FLAG){
                             //X좌표 데이터 요청
-                            if(can_request_pid(PID_STEERING_DATA) < 0){
-                                perror("[C] STEERING_DATA request error");
+                            if(can_request_pid(PID_GPS_XDATA) < 0){
+                                perror("[C] PID_GPS_XDATA request error");
                             }
                         }
                         //x좌표 데이터를 받았다면
                         else{
-                            if(can_request_pid(PID_STEERING_DATA) < 0){
-                                perror("[C] STEERING_DATA request error");
+                            //Y좌표 데이터 요청
+                            if((state_flag & GPS_YDATA_FLAG) != GPS_YDATA_FLAG){   // ✅ FLAG로 검사
+                                if(can_request_pid(PID_GPS_YDATA) < 0){
+                                    perror("[C] PID_GPS_YDATA request error");
+                                }
                             }
                         }
                     }
-                    
                     //GPS 데이터를 받았다면
-                    if((state_flag & GPS_DATA_FLAG) == GPS_DATA_FLAG){
+                    else{
                         //스티어링 데이터 요청
                         if(can_request_pid(PID_STEERING_DATA) < 0){
                             perror("[C] STEERING_DATA request error");
                         }
                     }
-                    //GPS 데이터를 받지 않았다면
-                    else if((state_flag & GPS_DATA_FLAG) != GPS_DATA_FLAG){
-                        //GPS 데이터 요청
-                        if(can_request_pid(PID_GPS_DATA) < 0){
-                            perror("[C] GPS request error");
-                        }
-                    }
-
                 }
+
+                //필수 데이터를 모두 수집했으면
                 else{
                     //여기에 파이썬 실행 코드 추가, GPS좌표와 스티어링 데이터를 넘김
                     // ===== [ADD] 필수 두 데이터(GPS, 조향각)가 준비되면, 파이썬에 분석 명령 전송 =====
                     if (send_ai_request(stream_to_python, &vehicle_data) == 0) {
-                        state_flag |= AI_REQUEST_FLAG;   // 중복 요청 방지
+                        ai_state_flag |= AI_REQUEST_FLAG;   // 중복 요청 방지
                     } else {
                         perror("[C] send_ai_request failed");
                     }
@@ -241,8 +244,35 @@ int main() {
                 // (요구사항: AI가 돌고 있는 동안에도 CAN 수집은 계속된다)
                 // 필요시 여기에서 엔진, 속도, 브레이크, 타이어 등 추가 PID를 라운드-로빈으로 요청해도 됨.
                 // 예시(프로토타입): 속도/엔진RPM 라운드로 요청
-                // if (can_request_pid(PID_ENGINE_SPEED) < 0) perror("[C] REQ RPM");
-                // if (can_request_pid(PID_VEHICLE_SPEED) < 0) perror("[C] REQ SPEED");
+                
+                //다른 CAN 데이터를 받지 못핬다면
+                if((state_flag & DATA_AVAILABLE) != DATA_AVAILABLE){
+
+                    //리스트를 순회하며 아직 받지 못한 PID를 찾음
+                    for(unsigned char i = 0; i < num_pids_to_request; i++){
+                        //이번 순서에 확인할 요청 정보 가져오기
+                        const CANRequest* current_req = &pids_to_request[next_pid_index];
+
+                        //이 요청에 해당하는 데이터가 아직 수신되지 않았으면
+                        if((state_flag & current_req->flag) != current_req->flag){
+                            
+                            //CAN버스로 데이터 요청
+                            if(can_request_pid(current_req->pid) < 0){
+                                ;;
+                            }
+
+                            //인덱스 업데이트
+                            next_pid_index = (next_pid_index + 1) % num_pids_to_request;
+                            break;
+                        }
+                        //이미 플래그가 세워져 있으면 인덱스 1 증가시킴
+                        next_pid_index = (next_pid_index + 1) % num_pids_to_request;
+
+                    }
+                }
+                
+
+                
             }
 
             // --- B. I/O 멀티플렉싱(select) 단계 ---
@@ -312,7 +342,7 @@ int main() {
             /* COMPLETE_DATA_FLAG는 hardware.h에 정의된 전체 데이터 집합 플래그임.
                (ENGINE_SPEED, VEHICLE_SPEED, GEAR_STATE, GPS, STEERING, BRAKE, TIRE 등)
                프로토타입에서는 이 완전 세트를 만족했을 때 한 번 제어 로직을 실행하도록 구성. */
-            if ( (state_flag & STATE_AI_RESULT_RECEIVED) &&
+            if ( ((ai_state_flag & 0x01) == 0x01) &&
                  ((state_flag & COMPLETE_DATA_FLAG) == COMPLETE_DATA_FLAG) ) {
 
                 // ======= [ADD] 최종 제어 로직 트리거 지점 ===================================
@@ -327,13 +357,13 @@ int main() {
                 fflush(stdout);
 
                 // (정책) 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
-                state_flag &= ~(STATE_AI_RESULT_RECEIVED | AI_REQUEST_FLAG);
+                state_flag &= ~(GPS_XDATA_FLAG | GPS_YDATA_FLAG | STEERING_DATA_FLAG);
+                ai_state_flag = 0;
                 if (ai_result) { cJSON_Delete(ai_result); ai_result = NULL; }
 
                 // 필요하면 필수 두 데이터(GPS/STEER) 플래그만 리셋해서,
                 // 다시 두 데이터를 확보한 뒤 새로운 analyze 라운드를 도는 정책도 가능.
                 // 예)
-                state_flag &= ~0x00;
             }
 
         } // --- while(1) 루프 끝 ---
