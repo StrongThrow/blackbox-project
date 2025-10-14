@@ -1,23 +1,23 @@
 /**
- * @file main_final_version.c
+ * @file main.c
  * @brief [최종 완성본] C와 Python을 연동하는 비동기 제어 시스템의 메인 프로그램.
  * @details
- * 이 프로그램은 우리가 논의한 모든 고급 기법을 포함합니다:
- * 1.  **프로세스 모델**: C가 부모(지휘자), Python이 자식(AI 분석 전문가)으로 동작합니다.
- * 2.  **프로세스 간 통신(IPC)**: 두 개의 파이프(pipe)를 사용해 안정적인 양방향 통신 채널을 구축합니다.
+ * 이 프로그램은 아래의 동작들을 수행함
+ * 1.  **프로세스 모델**: C가 부모(지휘자), Python이 자식(AI 분석)으로 동작.
+ * 2.  **프로세스 간 통신(IPC)**: 두 개의 파이프(pipe)를 사용해 안정적인 양방향 통신 채널을 구축.
  * 3.  **동적 경로 탐색**: C 실행 파일의 위치를 기준으로 Python 스크립트의 절대 경로를 동적으로 계산하여,
- * 어디서 프로그램을 실행하든 경로 문제 없이 Python을 실행할 수 있습니다. (이식성/견고성 향상)
+ * 어디서 프로그램을 실행하든 경로 문제 없이 Python을 실행 가능.
  * 4.  **비동기 I/O 처리**: 'select()' 시스템 콜을 사용하여 여러 입력 소스(Python의 응답, CAN 메시지 등)를
- * 하나의 스레드에서 효율적으로 동시에 감시하고 처리합니다. ('AI 분석 대기 중 CAN 통신' 요구사항 해결)
+ * 하나의 스레드에서 효율적으로 동시에 감시하고 처리. ('AI 분석 대기 중 CAN 통신' 요구사항 해결)
  * 5.  **상태 관리(State Management)**: 비동기적으로 도착하는 데이터들(AI 결과, CAN 메시지)을
- * 상태 변수에 저장했다가, 모든 데이터가 준비되었을 때만 최종 제어 로직을 수행합니다.
+ * 상태 변수에 저장했다가, 모든 데이터가 준비되었을 때만 최종 제어 로직을 수행.
  *
  * @compile
- * gcc main_final_version.c cJSON.c -o main_app -lm
- * (cJSON.c와 cJSON.h 파일이 같은 폴더에 있어야 합니다.)
+ * make clean => 
+ * make cross => 타켓 보드용 컴파일
  *
  * @run
- * ./main_app
+ * ./run.sh
  * (종료하려면 터미널에서 Ctrl+C를 누르세요.)
  */
 
@@ -34,11 +34,14 @@
 #include "cJSON.h"      // cJSON 라이브러리 사용을 위한 헤더
 #include "hardware.h"
 
+
 // --- 2. 전역 변수 ---
-static pid_t python_pid = -1;
 static FILE* stream_to_python = NULL;
 static FILE* stream_from_python = NULL;
 static int pipe_from_python_fd = -1;
+
+static DetectedObject *g_ai_objs = NULL;
+static int g_ai_count = 0;
 
 //요청할 PID와 완료 조건을 짝지어 목록으로 정의함
 static const CANRequest pids_to_request[] ={
@@ -52,6 +55,99 @@ static const CANRequest pids_to_request[] ={
 static const unsigned char num_pids_to_request = sizeof(pids_to_request) / sizeof(pids_to_request[0]);
 //다음에 확인할 PID의 인덱스를 저장할 변수
 static unsigned char next_pid_index = 0;
+
+/* =======================================================================================
+* @brief JSON 문자열을 파싱하여 DetectedObject 구조체 배열로 동적 할당.
+* @param json_string Python으로부터 받은 JSON 문자열.
+* @param count 파싱된 객체의 개수를 저장할 포인터.
+* @return 동적으로 할당된 DetectedObject 배열의 포인터. 사용 후 반드시 free() 해야 함.
+* 파싱 실패 시 NULL을 반환.
+* =======================================================================================*/
+
+DetectedObject* parse_ai_results(const char* json_string, int*count){
+
+    if(!count) return NULL;
+
+    //count 포인터가 가르키는 값을 0으로 초기화함, 실패 시에도 안정성 확보
+    *count = 0;
+
+    if(!json_string) return NULL;
+    
+    //입력받은 문자열(json_string)을 cJSON 라이브러리를 사용해 파싱함
+    //결과로 JSON 구조 전체를 나타내는 cJSON 객체(트리구조)의 최상위 노드(root)를 얻음
+    cJSON *root = cJSON_Parse(json_string);
+
+    //파싱에 실패하면 NULL값 반환
+    if(NULL == root){
+        fprintf(stderr, "[C] Python JSON pare error\n");
+        return NULL;
+    }
+
+    //root 객체에서 objects라는 key를 가진 항목을 찾음
+    cJSON *objects_array = cJSON_GetObjectItemCaseSensitive(root, "objects");
+
+    //object 항목이 JSON배열 타입이 맞는지 확인
+    if(!cJSON_IsArray(objects_array)){
+        fprintf(stderr, "[C] 'objects' key is not an array\n");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    //배열에 몇 개의 객체가 들어있는지 확인
+    int object_count = cJSON_GetArraySize(objects_array);
+
+    //탐지된 객체가 하나도 없는 경우 NULL을 반환
+    if(object_count <= 0){
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    //메모리 동적 할당, 탐지된 객체의 수만큼 DetectedObject 구조체 배열을 위한 메모리를 힙에 할당
+    DetectedObject* result_array = (DetectedObject*)malloc(object_count * sizeof(DetectedObject));
+    
+    //메모리 오류 검사, 메모리가 부족하면 NULL을 반환
+    if(NULL == result_array){
+        fprintf(stderr, "[C] Failed to allocate memory for objects array\n");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    //배열 초기화
+    memset(result_array, 0, sizeof(DetectedObject) * object_count);
+
+    //cJSON_ArrayForEach 매크로를 사용하여 배열의 모든 요소를 순회
+    int i = 0;
+    cJSON *element;
+    cJSON_ArrayForEach(element, objects_array){
+
+        if(!cJSON_IsObject(element))
+            continue; //객체가 아니면 스킵
+
+        cJSON *jlabel = cJSON_GetObjectItemCaseSensitive(element, "label");
+        cJSON *jx     = cJSON_GetObjectItemCaseSensitive(element, "x");
+        cJSON *jy     = cJSON_GetObjectItemCaseSensitive(element, "y");
+        cJSON *jax    = cJSON_GetObjectItemCaseSensitive(element, "ax");
+        cJSON *jay    = cJSON_GetObjectItemCaseSensitive(element, "ay");
+
+        result_array[i].label = (unsigned char)(cJSON_IsNumber(jlabel) ? jlabel->valueint   : 0);
+        result_array[i].x     = (float)(cJSON_IsNumber(jx)     ? jx->valuedouble            : 0.0f);
+        result_array[i].y     = (float)(cJSON_IsNumber(jy)     ? jy->valuedouble            : 0.0f);
+        result_array[i].ax    = (float)(cJSON_IsNumber(jax)    ? jax->valuedouble           : 0.0f);
+        result_array[i].ay    = (float)(cJSON_IsNumber(jay)    ? jay->valuedouble           : 0.0f);
+        i++;
+    }
+
+    cJSON_Delete(root);
+
+    if(i == 0){
+        free(result_array);
+        return NULL;
+    }
+
+    *count = i;
+    return result_array;
+
+}
 
 /* =======================================================================================
  * ===== [ADD] 헬퍼: 파이썬 analyze 요청 라인 프로토콜 전송 (GPS/STEER 포함) ==================
@@ -78,20 +174,21 @@ static int send_ai_request(FILE* to_py, const VehicleData* v) {
  *  - 목적: Py -> C로 들어온 한 줄(JSON 문자열)을 파싱해 ai_result에 저장하고 상태 플래그 설정
  *  - 실패해도 치명적이지 않으므로 파싱 실패는 로깅 후 무시(프로토타입 전략)
  * ======================================================================================= */
-static int handle_python_line(const char* line, unsigned char* state_flag, cJSON** out_ai) {
+static int handle_python_line(const char* line, unsigned char* state_flag) {
     if (!line || !state_flag) return -1;
 
-    /* 파이썬 vision_server.py는 print(json.dumps(...)) + flush로 한 줄을 보낸다고 가정.
-       JSON 포맷이 아닐 가능성(디버그 문자열 등)이 있으므로 파싱 실패는 에러로 두지 않는다. */
-    cJSON* root = cJSON_Parse(line);
-    if (!root) {
-        /* 필요하면 fprintf(stderr, "..."); 로 남길 수 있음 */
+    int n = 0;
+    DetectedObject *objs = parse_ai_results(line, &n);
+    if(!objs || n <= 0){
+        fprintf(stderr, "[C] AI parse failed or empty objects\n");
         return -1;
     }
-    if (*out_ai) cJSON_Delete(*out_ai);
-    *out_ai = root;
 
-    *state_flag |= AI_REQUEST_FLAG;   // "AI 결과 수신" 상태 완료
+    if(g_ai_objs) free(g_ai_objs);
+    g_ai_objs = objs;
+    g_ai_count = n;
+
+    *state_flag |= AI_RESULT_READY_FLAG;   // AI 결과 수신 상태 완료
     return 0;
 }
 
@@ -116,7 +213,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    // --- 3. 자식 프로세스(Python으로 변신할) 코드 영역 ---
+    // --- 3. 자식 프로세스(Python) 코드 영역 ---
     if (pid == 0) {
         // --- 3-1. 표준 입출력(I/O) 재지정 ---
         // '물길 바꾸기' 작업. 자식 프로세스의 기본 통신 채널을 우리가 만든 파이프로 연결합니다.
@@ -142,6 +239,8 @@ int main() {
             char *base_dir = strrchr(exe_path, '/');
             if (base_dir != NULL) *base_dir = '\0';
             char script_path[1024];
+
+
             snprintf(script_path, sizeof(script_path), "%s/ai/vision_server.py", exe_path);
             
             fprintf(stderr, "[C Child] Found python script at: %s\n", script_path);
@@ -156,7 +255,7 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    // --- 4. 부모 프로세스(C 지휘자) 코드 영역 ---
+    // --- 4. 부모 프로세스 코드 영역 ---
     else {
         // --- 4-1. 부모 프로세스의 파이프 및 스트림 설정 ---
         close(c_to_python_pipe[0]);
@@ -184,7 +283,6 @@ int main() {
         // --- 4-3. 상태 관리를 위한 변수 선언 ---
         VehicleData vehicle_data = {0}; // 차량 데이터를 저장할 구조체
         CANMessage can_message = {0};   // CAN통신 데이터 프레임
-        cJSON* ai_result = NULL;        // AI 분석 결과를 저장할 JSON 객체
         unsigned char state_flag = 0;   // 상태 플래그
         unsigned char ai_state_flag = 0;// AI 분석 결과 플래그
 
@@ -244,34 +342,40 @@ int main() {
                 // (요구사항: AI가 돌고 있는 동안에도 CAN 수집은 계속된다)
                 // 필요시 여기에서 엔진, 속도, 브레이크, 타이어 등 추가 PID를 라운드-로빈으로 요청해도 됨.
                 // 예시(프로토타입): 속도/엔진RPM 라운드로 요청
+
+
+                // ======= [ADD] AI가 처리할동안 작업 수행 부분 ================================
                 
                 //다른 CAN 데이터를 받지 못핬다면
                 if((state_flag & DATA_AVAILABLE) != DATA_AVAILABLE){
-
+                    
                     //리스트를 순회하며 아직 받지 못한 PID를 찾음
                     for(unsigned char i = 0; i < num_pids_to_request; i++){
                         //이번 순서에 확인할 요청 정보 가져오기
                         const CANRequest* current_req = &pids_to_request[next_pid_index];
-
+                        
                         //이 요청에 해당하는 데이터가 아직 수신되지 않았으면
                         if((state_flag & current_req->flag) != current_req->flag){
                             
                             //CAN버스로 데이터 요청
                             if(can_request_pid(current_req->pid) < 0){
-                                ;;
+                                perror("[C] CAN_Data_request failed");
                             }
-
+                            
                             //인덱스 업데이트
                             next_pid_index = (next_pid_index + 1) % num_pids_to_request;
                             break;
                         }
                         //이미 플래그가 세워져 있으면 인덱스 1 증가시킴
                         next_pid_index = (next_pid_index + 1) % num_pids_to_request;
-
+                        
                     }
                 }
-                
 
+
+                // ===========================================================================
+                
+                
                 
             }
 
@@ -308,7 +412,7 @@ int main() {
                 char line[4096];
                 while (fgets(line, sizeof(line), stream_from_python)) {
                     /* vision_server.py는 결과를 한 줄 JSON으로 print하고 flush함 */
-                    handle_python_line(line, &state_flag, &ai_result);
+                    handle_python_line(line, &ai_state_flag);
                     /* 파이썬이 여러 줄을 연속적으로 보낼 수 있으므로 while로 드레인 */
                 }
 
@@ -342,13 +446,20 @@ int main() {
             /* COMPLETE_DATA_FLAG는 hardware.h에 정의된 전체 데이터 집합 플래그임.
                (ENGINE_SPEED, VEHICLE_SPEED, GEAR_STATE, GPS, STEERING, BRAKE, TIRE 등)
                프로토타입에서는 이 완전 세트를 만족했을 때 한 번 제어 로직을 실행하도록 구성. */
-            if ( ((ai_state_flag & 0x01) == 0x01) &&
+            if ( ((ai_state_flag & AI_RESULT_READY_FLAG) == AI_RESULT_READY_FLAG) &&
                  ((state_flag & COMPLETE_DATA_FLAG) == COMPLETE_DATA_FLAG) ) {
 
-                // ======= [ADD] 최종 제어 로직 트리거 지점 ===================================
-                // 예) control_decision(&vehicle_data, ai_result);
-                //     - ai_result에서 위험도/객체/권고조향/감속명령 등을 추출
-                //     - vehicle_data(실측 CAN)와 결합해 실행 정책 판단
+                // ======= [ADD] 최종 제어 로직 지점 ==========================================
+                
+                 for (int i = 0; i < g_ai_count; ++i) {
+                    const DetectedObject *o = &g_ai_objs[i];
+                    // TODO: 제어 로직 / 박스 그리기 / 로그 등
+                    printf("[AI] L=%u x=%.2f y=%.2f ax=%.2f ay=%.2f\n",
+                               o->label, o->x, o->y, o->ax, o->ay);
+                }
+                //메모리 해제
+                if (g_ai_objs) { free(g_ai_objs); g_ai_objs = NULL; g_ai_count = 0; }
+
                 // ===========================================================================
                 fprintf(stdout,
                         "[C] CONTROL: AI+CAN 완료. speed=%d rpm=%d gear=%c gps(%.6f,%.6f) steer=%.3f\n",
@@ -356,14 +467,13 @@ int main() {
                         vehicle_data.gps_x, vehicle_data.gps_y, vehicle_data.degree);
                 fflush(stdout);
 
-                // (정책) 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
+                // 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
                 state_flag = 0;
                 ai_state_flag = 0;
-                if (ai_result) { cJSON_Delete(ai_result); ai_result = NULL; }
+                printf("\nfinish one cycle, next cycle will be started.\n");
 
                 // 필요하면 필수 두 데이터(GPS/STEER) 플래그만 리셋해서,
                 // 다시 두 데이터를 확보한 뒤 새로운 analyze 라운드를 도는 정책도 가능.
-                // 예)
             }
 
         } // --- while(1) 루프 끝 ---

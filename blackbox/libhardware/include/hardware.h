@@ -32,6 +32,7 @@ typedef struct{
 }CANRequest;
 
 #define AI_REQUEST_FLAG             0x01
+#define AI_RESULT_READY_FLAG        0x02
 
 #define GPS_AVAILABLE               (GPS_XDATA_FLAG|GPS_YDATA_FLAG)
 #define AI_AVAILABLE                (GPS_XDATA_FLAG|GPS_YDATA_FLAG|STEERING_DATA_FLAG)
@@ -90,6 +91,15 @@ int can_init(const char* interface_name); // <<-- 수정: 인터페이스 이름
 int can_send_message(const CANMessage* msg);
 int can_receive_message(CANMessage* msg); // 1=수신, 0=없음, <0=에러
 void can_close();
+
+// ================= 7. AI 통신 API =================
+typedef struct{
+    unsigned char label;
+    float x;
+    float y;
+    float ax;
+    float ay;
+}DetectedObject;
 
 #ifdef __cplusplus
 }
