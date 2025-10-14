@@ -7,10 +7,29 @@
     예시 실행:
       python3 fast_hero_sender.py \
         --town Town03 --follow \
+        --hero-speed 160 --hero-dist 5.0 --gap 5.0 --hero-lane-change \
+        --num-traffic 50 \
+        --serial /dev/ttyACM0 --baud 115200 \
+        --pi-ip 10.10.14.88 --base-port 5000
+
+        python3 fast_hero_sender.py \
+        --town Town03 --follow \
         --hero-speed 160 --hero-dist 1.0 --hero-lane-change \
         --num-traffic 50 \
         --serial /dev/ttyACM0 --baud 115200 \
         --pi-ip 10.10.14.88 --base-port 5000
+
+        main_client
+        python3 fast_hero_sender.py \
+        --town Town03 --follow \
+        --hero-speed 0 --hero-dist 1.0 --num-traffic 0 \
+        --serial /dev/ttyACM0 --baud 115200 \
+        --pi-ip 10.10.14.88 --base-port 5000 \
+        --async-mode    
+
+        client 
+        cd Carla/PythonAPI/example
+        python3 manual_control.py --host 10.10.14.51(호스트 서버) --port 2000
 '''
 
 import sys, os, glob, time, math, argparse, random, struct
@@ -112,12 +131,18 @@ class CarlaCameraManager:
         cam_bp.set_attribute("sensor_tick", str(1.0 / self.fps))
 
         positions = [
-            ( 2.5 ,  0.0, 0.7, 0,    0,   0),  # front (12시)
-            ( 2.5 ,  0.5, 0.7, 0,   30,   0),  # 2시
-            ( 2.5 , -0.5, 0.7, 0,  -30,   0),  # 10시
-            (-2.5 ,  0.0, 0.7, 0,  180,   0),  # rear (6시)
-            (-2.5 ,  0.5, 0.7, 0,  150,   0),  # 4시
-            (-2.5 , -0.5, 0.7, 0, -150,   0),  # 8시
+            # ( 2.5 ,  0.0, 0.7, 0,    0,   0),  # front (12시)
+            # ( 2.5 ,  0.5, 0.7, 0,   30,   0),  # 2시
+            # ( 2.5 , -0.5, 0.7, 0,  -30,   0),  # 10시
+            # (-2.5 ,  0.0, 0.7, 0,  180,   0),  # rear (6시)
+            # (-2.5 ,  0.5, 0.7, 0,  150,   0),  # 4시
+            # (-2.5 , -0.5, 0.7, 0, -150,   0),  # 8시
+            ( 2.5 , -0.5, 0.7, 0,  -55,   0),  # 10?
+            ( 2.5 ,  0.0, 0.7, 0,    0,   0),  # front (12?)
+            ( 2.5 ,  0.5, 0.7, 0,   55,   0),  # 2?
+            (-2.5 ,  0.5, 0.7, 0,  125,   0),  # 4?
+            (-2.5 ,  0.0, 0.7, 0,  180,   0),  # rear (6?)
+            (-2.5 , -0.5, 0.7, 0, -125,   0),  # 8?
         ]
 
         for i, (x, y, z, pitch, yaw, roll) in enumerate(positions):
@@ -214,7 +239,7 @@ def spawn_traffic(world: carla.World, n: int, seed: int = 42):
         return []
     random.seed(seed)
     bp_lib = world.get_blueprint_library()
-    veh_bps = bp_lib.filter('vehicle.*')
+    veh_bps = bp_lib.filter('model3')
     sps = world.get_map().get_spawn_points()
     random.shuffle(sps)
     spawned = []
@@ -239,6 +264,8 @@ def main():
     ap.add_argument('--port', type=int, default=2000)
     ap.add_argument('--town', default='', help='예) Town03 (빈값이면 현재 월드 유지)')
     ap.add_argument('--hz', type=float, default=float(FPS), help='CARLA tick 주기(Hz)')
+    ap.add_argument('--async-mode', action='store_true',
+                help='CARLA를 비동기 모드로 사용(다른 클라이언트와 동작 간섭 최소화)')
 
     # 히어로/트래픽
     ap.add_argument('--hero-filter', default='vehicle.*model3*')
@@ -268,6 +295,7 @@ def main():
     ap.add_argument('--can', action='store_true')
     ap.add_argument('--can-channel', default='can0')
     ap.add_argument('--can-id', type=lambda x: int(x, 0), default=0x100)
+    ap.add_argument('--gap', type=float, default=6.0, help='global min gap to leading vehicle (m)')
 
     args = ap.parse_args()
 
@@ -310,11 +338,18 @@ def main():
     tm = client.get_trafficmanager()
 
     original = world.get_settings()
-    new = world.get_settings()
-    new.synchronous_mode = True
-    new.fixed_delta_seconds = 1.0 / args.hz
-    world.apply_settings(new)
-    tm.set_synchronous_mode(True)
+    if args.async_mode:
+        new = world.get_settings()
+        new.synchronous_mode = False
+        new.fixed_delta_seconds = None
+        world.apply_settings(new)
+        tm.set_synchronous_mode(False)
+    else:
+        new = world.get_settings()
+        new.synchronous_mode = True
+        new.fixed_delta_seconds = 1.0 / args.hz
+        world.apply_settings(new)
+        tm.set_synchronous_mode(True)
     world.tick()
 
     # ===== 사전 정리(옵션)
@@ -354,11 +389,19 @@ def main():
     tm.ignore_lights_percentage(hero, 0)
     tm.ignore_signs_percentage(hero, 0)
     tm.vehicle_percentage_speed_difference(hero, diff_hero)
+
+    # 전역 추종거리 (모든 AI 차량)
     try:
-        tm.set_distance_to_leading_vehicle(hero, max(0.5, float(args.hero_dist)))
+        tm.set_global_distance_to_leading_vehicle(max(2.0, float(args.gap)))
+    except Exception:
+        pass
+
+    # 히어로 전용 (전역보다 더 크게 주고 싶으면)
+    try:
+        tm.set_distance_to_leading_vehicle(hero, max(2.0, float(args.hero_dist)))
     except Exception:
         try:
-            tm.set_global_distance_to_leading_vehicle(max(0.5, float(args.hero_dist)))
+            tm.set_global_distance_to_leading_vehicle(max(2.0, float(args.hero_dist)))
         except Exception:
             pass
     try:
@@ -366,7 +409,8 @@ def main():
     except Exception:
         pass
 
-    hero.set_autopilot(True, tm.get_port())
+    #hero.set_autopilot(True, tm.get_port())
+    hero.set_autopilot(False)
 
     for v in traffic:
         try:
