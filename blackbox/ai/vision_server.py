@@ -1,92 +1,519 @@
 # -*- coding: utf-8 -*-
 """
-vision_server.py (테스트 더미)
-- C에서 "analyze {json}\n" 요청이 오면 0.5초 뒤 임의의 객체 목록을 JSON으로 응답.
-- 표준 출력(stdout)으로만 결과를 보내고, 표준 에러(stderr)로는 로그를 남김.
-- 의존성: 표준 라이브러리만 사용.
+vision_server.py (간소화 안정화 버전)
+
+파이프라인:
+6캠 실시간 입력 → Backbone(HEF, UINT8) → (host quant) → Transformer(HEF, UINT8) → (dequant) → ONNX Postproc(float) → 디코드 → BEV 시각화
 """
+import os
 import sys
-import json
 import time
-import random
-import signal
+import threading
+import json
+import math
+from queue import Queue
+
+import numpy as np
+import cv2
+import torch
+import onnxruntime as ort
+
+#-------------------------------imsi-----------------------------------
+
+import fps_calc
+import multiprocessing
+import pre_post_process
+import core
+import demo_manager
+import async_api
+import visualization
+
+
+# ---- Hailo ----
+from hailo_platform import (HEF, Device, VDevice, HailoSchedulingAlgorithm)
+
+# ---- GStreamer ----
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
+
+
+# =================== 설정 ===================
+# 입력(카메라)
+SRC_W, SRC_H = 800, 320
+NUM_CAMS = 6
+PORT0 = 5000  # udpsrc 시작 포트 (5000~5005)
+
+# 모델 경로
+MODELS_DIR = os.path.dirname(__file__)
+BACKBONE_HEF    = os.path.join(MODELS_DIR, "petrv2_repvggB0_backbone_pp_800x320.hef")
+TRANSFORMER_HEF = os.path.join(MODELS_DIR, "petrv2_repvggB0_transformer_pp_800x320.hef")
+POSTPROC_ONNX   = os.path.join(MODELS_DIR, "petrv2_postprocess.onnx")
+MATMUL_NPY      = os.path.join(MODELS_DIR, "matmul.npy")
+MAX_QUEUE_SIZE = 3
+# BEV 렌더링
+BEV_SIZE = 640
+XY_RANGE_M = 61.2
+LINE_W = 2
+
 
 def log(msg: str):
     print(f"[Py LOG] {msg}", file=sys.stderr, flush=True)
 
-def make_dummy_objects():
-    """
-    C 쪽 DetectedObject 스키마에 맞춘 더미 객체들 생성:
-      - label: 0~4
-      - x, y: 전방/좌우 위치 (m 가정) -> 대략 1~30m, -5~5m
-      - ax, ay: 상대 가속/속도 같은 값 느낌으로 -2~2 범위 임의
-    """
-    n = random.randint(1, 5)  # 0~5개
-    objs = []
-    for _ in range(n):
-        obj = {
-            "label": random.randint(0, 4),
-            "x": round(random.uniform(1.0, 30.0), 2),
-            "y": round(random.uniform(-5.0, 5.0), 2),
-            "ax": round(random.uniform(-2.0, 2.0), 2),
-            "ay": round(random.uniform(-2.0, 2.0), 2),
+
+# =================== 유틸 (qparam/양자화/BEV) ===================
+import queue as _queue
+
+def _np_to_py(obj):
+    import numpy as _np
+    if isinstance(obj, _np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, _np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {k: _np_to_py(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_np_to_py(v) for v in obj]
+    return obj
+
+def _build_json_msg(dets_dict, meta=None):
+    item = {}
+    if isinstance(dets_dict, dict) and dets_dict.get('pts_bbox'):
+        item0 = dets_dict['pts_bbox'][0]
+        item = {
+            "boxes_3d": _np_to_py(item0.get("boxes_3d", [])),
+            "scores_3d": _np_to_py(item0.get("scores_3d", [])),
+            "labels_3d": _np_to_py(item0.get("labels_3d", [])),
         }
-        objs.append(obj)
-    return objs
+    return {
+        "status": "success",
+        "detections": { "pts_bbox": [item] if item else [] },
+        # meta는 일단 None. post_proc가 메타를 안 내보내므로 안전하게 비워둠
+        "meta": meta or {}
+    }
 
-def parse_command(line: str):
-    """
-    'analyze {json}' 형태에서 payload만 파싱 (없어도 동작은 하게 관대하게 처리)
-    """
-    line = line.strip()
-    if not line:
-        return None, None
-    if not line.startswith("analyze"):
-        return None, None
-
-    payload = None
-    # 'analyze ' 뒤에 JSON이 붙어 있을 수도 있음
-    if len(line) > len("analyze"):
-        rest = line[len("analyze"):].strip()
-        if rest:
-            try:
-                payload = json.loads(rest)
-            except Exception:
-                payload = None
-    return "analyze", payload
-
-def main():
-    random.seed()  # 필요하면 고정 seed로 재현성 확보 가능: random.seed(1234)
-    log("Dummy vision server started. Waiting for commands on stdin...")
-
-    # Ctrl+C 핸들러(깨끗한 종료)
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-
+def json_sender_proc(det_q):
+    import sys, json
+    import pre_post_process as pp  # ← 이미 import되어 있으면 생략
     while True:
-        line = sys.stdin.readline()
-        if not line:
-            log("stdin closed. exiting.")
-            break
-
-        cmd, payload = parse_command(line)
-        if cmd != "analyze":
-            log(f"ignored line: {line.strip()}")
+        try:
+            item = det_q.get(timeout=1)
+        except _queue.Empty:
             continue
 
-        # (옵션) 넘겨받은 GPS/steer를 참고해 무언가 하려면 payload를 활용
-        # payload 예: {"gps":[x,y], "steer": deg}
-        log(f"received analyze request. payload={payload}")
+        # post_proc가 (pp_output, meta) 를 넣는 구조
+        meta = None
+        if isinstance(item, tuple) and len(item) == 2:
+            pp_output, meta = item
+            dets_dict = pp.decode(pp_output)   # ← ★ 여기서 디코딩
+        else:
+            dets_dict = item  # 이미 dict 형태면 그대로
 
-        # 요구사항: 0.5초 뒤에 임의 데이터 응답
-        time.sleep(0.5)
-
-        result = {
-            "status": "ok",
-            "objects": make_dummy_objects(),
-        }
-        print(json.dumps(result, ensure_ascii=False))
+        msg = _build_json_msg(dets_dict, meta=meta)
+        sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
         sys.stdout.flush()
-        log("dummy result sent.")
+# === Add to vision_server.py (상단 유틸 근처) ===
+import math
+import numpy as np
+import cv2
+
+def _rot_rect_corners(cx, cy, w, l, yaw):
+    # 중심(cx,cy), 폭(w), 길이(l), 라디안 yaw(차량 진행방향이 +x 기준)
+    # 4코너 (앞-왼, 앞-오, 뒤-오, 뒤-왼) 시계방향
+    hw, hl = w/2.0, l/2.0
+    corners = np.array([
+        [ +hl, +hw],  # front-right (x forward, y left 기준이면 순서 맞춰도 무방)
+        [ +hl, -hw],
+        [ -hl, -hw],
+        [ -hl, +hw],
+    ], dtype=np.float32)
+    c, s = math.cos(yaw), math.sin(yaw)
+    R = np.array([[c,-s],[s,c]], dtype=np.float32)
+    rot = (R @ corners.T).T
+    rot[:,0] += cx
+    rot[:,1] += cy
+    return rot  # (4,2) in meters (BEV 좌표계)
+
+def _meters_to_pixels(xy, origin_px, scale):
+    # origin_px = (ox, oy), scale = px per meter
+    xy_px = xy.copy()
+    xy_px[:,0] = origin_px[0] + xy[:,0]*scale
+    xy_px[:,1] = origin_px[1] - xy[:,1]*scale  # y축 뒤집기(위가 +)
+    return xy_px.astype(np.int32)
+
+def make_bev_canvas(size=640, xy_range=61.2):
+    bev = np.ones((size, size, 3), np.uint8)*255
+    # 중심 십자선/격자
+    ox = oy = size//2
+    cv2.line(bev, (0, oy), (size, oy), (220,220,220), 1)
+    cv2.line(bev, (ox, 0), (ox, size), (220,220,220), 1)
+    # 10m grid
+    scale = size/(2*xy_range)
+    for m in range(-60, 61, 10):
+        y = int(oy - m*scale)
+        x = int(ox + m*scale)
+        cv2.line(bev, (0,y), (size,y), (240,240,240), 1)
+        cv2.line(bev, (x,0), (x,size), (240,240,240), 1)
+    # ego box
+    cv2.rectangle(bev, (ox-5, oy-10), (ox+5, oy+10), (0,255,0), 2)
+    return bev
+
+def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
+    # dets: pre_post_process.decode() 결과(dict)
+    if not dets or not dets.get('pts_bbox'): 
+        return canvas
+    item = dets['pts_bbox'][0]
+    boxes3d = np.asarray(item.get('boxes_3d', []))  # (N, >=7) = [cx, cy, cz, w, l, h, yaw, ...]
+    scores  = np.asarray(item.get('scores_3d', []))
+    labels  = np.asarray(item.get('labels_3d', []))
+
+    if boxes3d.size == 0:
+        return canvas
+
+    H, W = canvas.shape[:2]
+    ox = oy = W//2
+    scale = W/(2*xy_range)
+
+    for i in range(len(boxes3d)):
+        s = float(scores[i]) if i < len(scores) else 1.0
+        if labels[i] == 4 or labels[i] == 5 or labels[i] == 9 :
+            continue
+        if s < score_thresh:
+            continue
+        cx, cy, cz, l, w, h, yaw = boxes3d[i, :7]
+
+        # 범위 밖이면 스킵
+        if abs(cx) > xy_range or abs(cy) > xy_range:
+            continue
+
+        # 코너 4점(m) → 픽셀
+        corners_m = _rot_rect_corners(cx, cy, w, l, yaw)
+        corners_px = _meters_to_pixels(corners_m, (ox, oy), scale)
+
+        # 박스
+        cv2.polylines(canvas, [corners_px], isClosed=True, color=(0,0,255), thickness=2)
+
+        # 진행방향(앞쪽 에지의 중점)
+        front_mid_m = (corners_m[0] + corners_m[1]) / 2.0
+        center_px = _meters_to_pixels(np.array([[cx,cy]]), (ox,oy), scale)[0]
+        front_px  = _meters_to_pixels(np.array([front_mid_m]), (ox,oy), scale)[0]
+        cv2.line(canvas, center_px, front_px, (0,0,255), 2)
+
+        # 라벨/점수
+        cv2.putText(canvas, f"{int(labels[i])}:{s:.2f}", front_px, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (20,20,20), 1, cv2.LINE_AA)
+
+    return canvas
+
+# === Add to vision_server.py ===
+
+
+# === 3x2 모자이크 유틸 ===
+def draw_cam_index(img, idx):
+    cv2.putText(img, f"Cam {idx}", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 3, cv2.LINE_AA)
+    cv2.putText(img, f"Cam {idx}", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 1, cv2.LINE_AA)
+    return img
+
+def make_mosaic_grid(img_list, rows=2, cols=3, tile_wh=(400,160), pad=4, order=None, draw_index=True):
+    """
+    img_list: [H,W,3] BGR 이미지 리스트 (최대 rows*cols개)
+    tile_wh: 한 타일 크기 (w,h)
+    pad: 타일 간 여백(px)
+    order: [이미지 인덱스 배치 순서], 예) [0,1,2,3,4,5]
+    """
+    if order is None:
+        order = list(range(len(img_list)))
+    # 캔버스 크기 계산
+    tw, th = tile_wh
+    grid_w = cols * tw + (cols + 1) * pad
+    grid_h = rows * th + (rows + 1) * pad
+    canvas = np.zeros((grid_h, grid_w, 3), np.uint8)
+
+    # 배치
+    for k in range(rows * cols):
+        r = k // cols
+        c = k % cols
+        x0 = pad + c * (tw + pad)
+        y0 = pad + r * (th + pad)
+
+        if k < len(order) and order[k] < len(img_list) and img_list[order[k]] is not None:
+            tile = cv2.resize(img_list[order[k]], (tw, th))
+            if draw_index:
+                tile = draw_cam_index(tile, order[k])
+        else:
+            tile = np.zeros((th, tw, 3), np.uint8)
+
+        canvas[y0:y0+th, x0:x0+tw] = tile
+
+    # 테두리
+    cv2.rectangle(canvas, (0,0), (grid_w-1, grid_h-1), (40,40,40), 1)
+    return canvas
+
+def bev_viz_proc(in_queue):
+    import cv2, numpy as np
+    import pre_post_process as pp
+
+    win = 'BEV'
+    print("[BEV] proc start")  # 디버그 로그
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, 700, 700)
+
+    last_dets = None  # 마지막 디텍션 유지
+
+    while True:
+        try:
+            item = in_queue.get(timeout=0.5)
+            if isinstance(item, tuple) and len(item) == 2:
+                pp_output, meta = item
+                last_dets = pp.decode(pp_output)
+            else:
+                last_dets = item
+        except _queue.Empty:
+            # 새 입력이 없어도 이전/빈 캔버스를 계속 렌더
+            pass
+
+        bev = make_bev_canvas(size=640, xy_range=XY_RANGE_M)
+        if last_dets:
+            bev = draw_bev_boxes_on(bev, last_dets, score_thresh=0.3, xy_range=XY_RANGE_M)
+
+        cv2.imshow(win, bev)
+        if cv2.waitKey(1) == 27:
+            break
+
+    cv2.destroyAllWindows()
+
+
+
+# =================== GStreamer 수신 ===================
+class GstVideoReceiver:
+    def __init__(self, port: int):
+        self.port = port
+        self.pipeline = None
+        self.appsink = None
+        self.latest_frame = None
+        self._stop = False
+        self._th = None
+
+    def init_pipeline(self):
+        # appsink를 BGR로 맞춤
+        pipeline_str = (
+            f"udpsrc port={self.port} ! "
+            "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
+            "rtpjitterbuffer latency=60 ! "
+            "rtph264depay ! h264parse config-interval=-1 ! "
+            "avdec_h264 max-threads=0 ! videoconvert ! "
+            "queue max-size-buffers=5 ! "  # 추가
+            "video/x-raw,format=BGR ! appsink name=sink drop=true max-buffers=1 sync=false"
+        )
+        self.pipeline = Gst.parse_launch(pipeline_str)
+        self.appsink = self.pipeline.get_by_name("sink")
+        self.pipeline.set_state(Gst.State.PLAYING)
+
+    def _pull(self):
+        # 일부 환경은 try_pull_sample 바인딩이 없어서 action-signal 사용
+        sample = self.appsink.emit("try-pull-sample", 50 * Gst.MSECOND)
+        if not sample:
+            return None
+        buf = sample.get_buffer()
+        caps = sample.get_caps()
+        s = caps.get_structure(0)
+        w = int(s.get_value("width"))
+        h = int(s.get_value("height"))
+        ok, mapinfo = buf.map(Gst.MapFlags.READ)
+        if not ok:
+            return None
+        try:
+            arr = np.frombuffer(mapinfo.data, dtype=np.uint8)
+            return arr.reshape((h, w, 3))
+        finally:
+            buf.unmap(mapinfo)
+
+    def _loop(self):
+        import time
+        idle_sleep = 0.005   # 5ms만 쉬어도 효과 큼
+        while not self._stop:
+            f = self._pull()
+            if f is None:
+                time.sleep(idle_sleep)   # ← 이 한 줄이 코어 100%를 크게 내림
+                continue
+            self.latest_frame = f
+
+    def start(self):
+        self._stop = False
+        self._th = threading.Thread(target=self._loop, daemon=True)
+        self._th.start()
+
+    def stop(self):
+        self._stop = True
+        if self._th:
+            self._th.join()
+        if self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+
+det_for_json_q = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+det_for_bev_q  = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+
+STOP = ("__STOP__", None)
+
+def fanout_proc(src_q, dst_qs):
+    import queue as _q
+    while True:
+        try:
+            item = src_q.get(timeout=0.5)
+        except _q.Empty:
+            continue
+        if item == STOP:
+            # 자식들에도 STOP 전달
+            for q in dst_qs:
+                try: q.put_nowait(STOP)
+                except: pass
+            break
+        # 각 목적지 큐로 non-blocking 전송 (풀이면 드롭)
+        for q in dst_qs:
+            try: q.put_nowait(item)
+            except: pass
+# =================== 메인 ===================
+def main():
+    log("Simple BEV server starting...")
+
+    # GStreamer 시작
+    Gst.init(None)
+    receivers = [GstVideoReceiver(PORT0 + i) for i in range(NUM_CAMS)]
+    for r in receivers:
+        r.init_pipeline()
+        r.start()
+
+
+    fps_calculator = fps_calc.FPSCalc(2)
+    queues = []
+    bb_tranformer_meta_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+    transformer_pp_meta_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+    bb_tranformer_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+    transformer_pp_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+    pp_3dnms_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+    nms_send_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+
+    queues.append(bb_tranformer_meta_queue)
+    queues.append(transformer_pp_meta_queue)
+    queues.append(bb_tranformer_queue)
+    queues.append(transformer_pp_queue)
+    queues.append(pp_3dnms_queue)
+    queues.append(nms_send_queue)
+    # Hailo VDevice
+    
+    manager = multiprocessing.Manager()
+    demo_mng = demo_manager.DemoManager(manager)
+    devices = Device.scan()
+    params = async_api.create_vdevice_params()
+    threads = []
+    processes = []
+    params = VDevice.create_params()
+    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN 
+
+    with VDevice(params) as target:
+        
+        # --- Backbone (in UINT8 / out UINT8)
+       
+        camera_in_q = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)  # 카메라 프레임을 백본으로 넘기는 큐
+
+        threads.append(threading.Thread(target=core.backbone_from_cam, args=(target, camera_in_q, BACKBONE_HEF, bb_tranformer_queue,
+                                    bb_tranformer_meta_queue, demo_mng, True)))
+        
+        threads.append(threading.Thread(target=core.transformer, args=(target, TRANSFORMER_HEF, MATMUL_NPY, bb_tranformer_queue, bb_tranformer_meta_queue, transformer_pp_queue, transformer_pp_meta_queue, demo_mng)))
+
+        processes.append(multiprocessing.Process(target=pre_post_process.post_proc,
+                                                    args=(transformer_pp_queue, transformer_pp_meta_queue,
+                                                    pp_3dnms_queue, POSTPROC_ONNX, demo_mng)))
+
+        # processes.append(multiprocessing.Process(target=pre_post_process.d3nms_proc,
+        #                                         args=(pp_3dnms_queue, nms_send_queue, nusc, demo_mng)))
+        # processes.append(multiprocessing.Process(target=visualization.viz_proc,
+        #                                 args=(args.input, args.data, nms_send_queue,
+        #                                 fps_calculator, nusc)))
+        # 스타트는 한 번만
+        for t in threads: t.start()
+        for p in processes: p.start()
+
+        # fanout
+        fan = multiprocessing.Process(target=fanout_proc, args=(pp_3dnms_queue, [det_for_json_q, det_for_bev_q]))
+        fan.daemon = True
+        fan.start()
+
+        # 각 소비자에는 자기 큐만 전달
+        # json_out = multiprocessing.Process(target=json_sender_proc, args=(det_for_json_q,))
+        # json_out.daemon = True
+        # json_out.start()
+
+        bev_proc = multiprocessing.Process(target=bev_viz_proc, args=(det_for_bev_q,), daemon=False)
+        bev_proc.start()
+        token  = 0
+        try :
+            while True:
+                # 1) 6캠 프레임 수집 + 예제 동일 전처리(800x450 → y=130~450 크롭 → 800x320)
+                images_after_pre = []
+                time.sleep(0.2)
+                for i in range(NUM_CAMS):
+                    f = receivers[i].latest_frame
+                    if f is None:
+                        f = np.zeros((SRC_H, SRC_W, 3), np.uint8)
+                    img = cv2.resize(f, (800, 450))
+                    x, y, width, height = 0, 130, 800, 450  
+                    img = img[y:height, x:x + width]
+
+                    images_after_pre.append(img)
+                cam_order = [0, 1, 2, 3, 4, 5]
+
+                # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
+                # tile_wh=(400,160) → 전체 약 (3*400 + 여백) x (2*160 + 여백) ≈ 1220x344
+                mosaic = make_mosaic_grid(
+                    images_after_pre,
+                    rows=2, cols=3,
+                    tile_wh=(400, 160),
+                    pad=6,
+                    order=cam_order,
+                    draw_index=True
+                )
+                cv2.imshow("Cams 3x2", mosaic)
+                cv2.waitKey(1)
+                print(f"[Main] Got {len(images_after_pre)} frames")
+
+                frames_np = np.asarray(images_after_pre, dtype=np.uint8)  
+                #token = time.time_ns()
+                token = token + 1
+                
+                try:
+                    camera_in_q.put((frames_np, {"token": token}), block=False)
+                    now = time.time()
+                    localtime = time.localtime(now)
+                    hi = time.strftime("%Y-%m-%d %H:%M:%S",localtime)
+                    print(f"{hi}[Main] size : {camera_in_q.qsize()}")
+                except:
+                    _ = camera_in_q.get()  # 가장 오래된 프레임 드롭
+                    print("[Main] WARN: camera_in_q full, dropping frame")
+                    pass
+                    
+                #print(json.dumps({"status": "success", "detections": detections}, ensure_ascii=False))
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            demo_mng.set_terminate()
+
+        finally:
+            # STOP 브로드캐스트
+            for q in (pp_3dnms_queue, det_for_json_q, det_for_bev_q):
+                try: q.put_nowait(STOP)
+                except: pass
+
+            # 스레드/프로세스 조인
+            for t in threads: t.join(timeout=1)
+            for p in processes: p.join(timeout=2)
+            #fan.join(timeout=1); json_out.join(timeout=1); bev_proc.join(timeout=1)
+
+            # 수신기 정지
+            for r in receivers: r.stop()
+
+            cv2.destroyAllWindows()
+
+    log("Done.")
+
 
 if __name__ == "__main__":
     main()
