@@ -32,6 +32,8 @@
 #include <sys/time.h>   // timeval 구조체 사용 (select 타임아웃)
 #include <sys/select.h> // select() 원형
 #include <signal.h>
+#include <time.h>
+#include <math.h>
 #include "cJSON.h"      // cJSON 라이브러리 사용을 위한 헤더
 #include "hardware.h"
 
@@ -64,6 +66,9 @@ static const CANRequest pids_to_request[] ={
 static const unsigned char num_pids_to_request = sizeof(pids_to_request) / sizeof(pids_to_request[0]);
 //다음에 확인할 PID의 인덱스를 저장할 변수
 static unsigned char next_pid_index = 0;
+
+//가속도 측정 구조체
+static SpeedMonitor g_spmon = {0};
 
 // ============================================================================
 // 파이썬 자식 프로세스를 시작하는 함수
@@ -150,8 +155,10 @@ static int start_python_process(void) {
 // ============================================================================
 static void stop_python_process(void) {
     // 1) stdio 스트림부터 닫아 내부 버퍼를 안전히 비움
-    if (stream_to_python)   { fclose(stream_to_python);   stream_to_python = NULL; }
-    if (stream_from_python) { fclose(stream_from_python); stream_from_python = NULL; }
+    // if (stream_to_python)   { fclose(stream_to_python);   stream_to_python = NULL; }
+    // if (stream_from_python) { fclose(stream_from_python); stream_from_python = NULL; }
+    if (stream_to_python)   { fclose(stream_to_python);   stream_to_python = NULL; c_to_python_pipe[1] = -1; }
+    if (stream_from_python) { fclose(stream_from_python); stream_from_python = NULL; python_to_c_pipe[0] = -1; }
 
     // 2) 로우 fd도 닫아줌 (중복 닫힘 방지 위해 -1 체크)
     if (c_to_python_pipe[0]   != -1) { close(c_to_python_pipe[0]);   c_to_python_pipe[0]   = -1; }
@@ -289,6 +296,22 @@ static int send_ai_request(FILE* to_py, const VehicleData* v) {
     return 0;
 }
 
+static int send_save_request(FILE* to_py, const VehicleData* v, const unsigned char value) {
+    if (!to_py || !v) return -1;
+
+    int n = fprintf(to_py,
+        "draw {\"value\":%u,\"speed\":%d,"
+        "\"tires\":[%u,%u,%u,%u]}\n",
+        (unsigned)value, v->speed,
+        v->tire_pressure[0], v->tire_pressure[1],
+        v->tire_pressure[2], v->tire_pressure[3]
+    );
+    if (n <= 0) return -1;
+
+    fflush(to_py);
+    return 0;
+}
+
 /* =======================================================================================
  * ===== [ADD] 헬퍼: 파이썬 한 줄(JSON) 처리 ==============================================
  *  - 목적: Py -> C로 들어온 한 줄(JSON 문자열)을 파싱해 ai_result에 저장하고 상태 플래그 설정
@@ -301,6 +324,7 @@ static int handle_python_line(const char* line, unsigned char* state_flag) {
     DetectedObject *objs = parse_ai_results(line, &n);
     if(!objs || n <= 0){
         fprintf(stderr, "[C] AI parse failed or empty objects\n");
+        *state_flag |= AI_RESEULT_ERROR_FLAG;   // AI 결과 에러 플래그
         return -1;
     }
 
@@ -310,6 +334,50 @@ static int handle_python_line(const char* line, unsigned char* state_flag) {
 
     *state_flag |= AI_RESULT_READY_FLAG;   // AI 결과 수신 상태 완료
     return 0;
+}
+
+static int wait_python_done(FILE* in, int fd, int timeout_ms)
+{
+    if (!in || fd < 0) return -1;
+
+    while (1) {
+        // 1) 읽기 가능해질 때까지 select()로 대기 (타임아웃 적용)
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+
+        struct timeval tv, *ptv = NULL;
+        if (timeout_ms > 0) {
+            tv.tv_sec  = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+            ptv = &tv;
+        }
+        int r = select(fd + 1, &rfds, NULL, NULL, ptv);
+        if (r < 0) {
+            if (errno == EINTR) continue;     // (신호로 깨어나면 재시도)
+            perror("[C] wait_python_done select");
+            return -1;
+        }
+        if (r == 0) {
+            // 2) 타임아웃: 더 기다리지 않음
+            return 1;
+        }
+
+        // 3) 읽을 데이터가 있음 → 라인 단위로 모두 읽어 "done" 확인
+        if (FD_ISSET(fd, &rfds)) {
+            char line[4096];
+            while (fgets(line, sizeof(line), in)) {
+                // (핵심) 정확히 "done"으로 시작하는 라인 수신 시 완료
+                if (strncmp(line, "done", 4) == 0) return 0;
+                // 그 외 라인은 무시(필요하면 여기서 별도 파서 호출 가능)
+            }
+            // 4) 더 이상 읽을 게 없고 EOF면 자식 종료로 판단
+            if (feof(in)) return -2;
+
+            // 논블로킹/부분읽기 등으로 인한 임시 에러 플래그 정리 후 루프 계속
+            clearerr(in);
+        }
+    }
 }
 
 // --- 3. main 함수: 모든 코드의 시작점 ---
@@ -333,7 +401,14 @@ int main() {
     unsigned char state_flag = 0;   // 상태 플래그
     unsigned char ai_state_flag = 0;// AI 분석 결과 플래그
 
+    unsigned char car_state_flag = 0;  // 자동차 상태 확인 플래그
+
+    struct timespec request_time, complete_time;
+    long diff_ns = 0;
+
     printf("[C] Main process start. Child PID: %d\n", (int)g_py_pid);
+
+    sleep(2000); //시작 대기 시간
 
     // --- 4-4. 메인 이벤트 루프: 장치의 심장 박동 ---
     while (1) {
@@ -528,32 +603,193 @@ int main() {
         if ( ((ai_state_flag & AI_RESULT_READY_FLAG) == AI_RESULT_READY_FLAG) &&
                 ((state_flag & COMPLETE_DATA_FLAG) == COMPLETE_DATA_FLAG) ) {
 
-            // ======= [ADD] 최종 제어 로직 지점 ==========================================
-            
+        // ======= [ADD] 최종 제어 로직 지점 ==========================================
+            if (g_ai_objs && g_ai_count > 0) {
                 for (int i = 0; i < g_ai_count; ++i) {
-                const DetectedObject *o = &g_ai_objs[i];
-                // TODO: 제어 로직 / 박스 그리기 / 로그 등
-                printf("[AI] L=%u x=%.2f y=%.2f ax=%.2f ay=%.2f\n",
-                            o->label, o->x, o->y, o->ax, o->ay);
+                    const DetectedObject *o = &g_ai_objs[i];
+                    // TODO: 제어 로직 
+                    printf("[AI] L=%u x=%.2f y=%.2f ax=%.2f ay=%.2f\n",
+                                o->label, o->x, o->y, o->ax, o->ay);
+                    //AI로부터 받은 JSON파일 분석
+                    // TODO: 동적 배열 for문으로 순회하면서 거리 및 좌표를 통한 거리 계산
+                    /*
+                    받는 데이터 형식
+                    typedef struct{
+                        unsigned char label;
+                        float x;
+                        float y;
+                        float ax;
+                        float ay;
+                    }DetectedObject;
+                    */
+                    //ai의 label 구성
+                    /*
+                    0 = car
+                    1 = truck
+                    2 = construction_vehicle
+                    3 = bus
+                    6 = motorcycle
+                    7 = bicycle
+                    8 = pedestrian // 보행자
+                    */
+                    float distance = hypotf(o->x, o->y);
+                    
+                    //거리가 임계값 안이라면
+                    if(distance <= MAX_DISTANCE){
+                        switch(o->label){
+                            case LABEL_CAR:
+                                break;
+
+                            case LABEL_TRUCK:
+                                car_state_flag |= DETECT_TRUCK;
+                                break;
+
+                            case LABEL_CONSTRUCTION_TRUCK:
+                                car_state_flag |= DETECT_TRUCK;
+                                break;
+
+                            case LABEL_BUS:
+                                break;
+
+                            case LABEL_TRAILER:
+                                break;
+
+                            case LABEL_BARRIER:
+                                break;
+
+                            case LABEL_MOTOCYCLE:
+                                car_state_flag |= DETECT_ODOBANGS;
+                                break;
+
+                            case LABEL_BICYCLE:
+                                car_state_flag |= DETECT_ODOBANGS;
+                                break;
+
+                            case LABEL_PEDESTRIAN:
+                                car_state_flag |= DETECT_HUMAN;
+                                break;
+
+                            case LABEL_TRAFFIC_CONE:
+                                break;
+
+                            default:
+                                break;
+                        }
+                    }
+
+                    
+                }
+                
+                //TODO : json으로 변환하여 python으로 전송
+                //status = car_state_flag |= DETECT_TRUCK;
+                //
+                                
+
             }
+            //=========가속도 저장 부분=============
+            double t_now = now_sec(); //현재 시간 측정
+            double v_now_kph = (double)vehicle_data.speed; //속도 int -> double 형변환
+            spmon_push(&g_spmon, v_now_kph, t_now); //속도, 시간 추가
+
+            //직전 샘플과 비교하여 가속도 계산 
+            double v_prev_kph, t_prev;
+            if(spmon_get_past(&g_spmon, 1, &v_prev_kph, &t_prev) == 0){
+                double dv_mps = (v_now_kph - v_prev_kph) * KPH_TO_MPS;
+                double dt     = t_now - t_prev;
+                if(dt > 0.0){
+                    double a_mps2 = dv_mps / dt;//가속도 계산
+                    
+                    //가속도 감지 후 동작
+
+                    //급가속
+                    if (a_mps2 >= ACCEL_THRESH_MPS2) {
+                        printf("[EVENT] 급가속 감지: a=%.2f m/s^2 (%.1f→%.1f km/h, dt=%.2fs)\n",
+                            a_mps2, v_prev_kph, v_now_kph, dt);
+                        // TODO: 급가속 플래그 On
+                        car_state_flag |= ACCELRATION;
+                        
+
+                    //급감속
+                    } else if (a_mps2 <= DECEL_THRESH_MPS2) {
+                        printf("[EVENT] 급감속 감지: a=%.2f m/s^2 (%.1f→%.1f km/h, dt=%.2fs)\n",
+                            a_mps2, v_prev_kph, v_now_kph, dt);
+                        // TODO: 급감속 플래그 on
+                        car_state_flag |= DECELERATION;
+                    }
+
+                }
+            }
+            
+            if (send_save_request(stream_to_python, &vehicle_data, car_state_flag) == 0) {
+                // 최대 3000ms(3초) 동안 "done" 대기. 0을 주면 무제한 대기.
+                int wr = wait_python_done(stream_from_python, pipe_from_python_fd, 0);
+                if (wr == 0) {
+                    printf("[C] Python done OK\n");
+                } else if (wr == 1) {
+                    fprintf(stderr, "[C] Python done timeout\n");
+                } else if (wr == -2) {
+                    fprintf(stderr, "[C] Python EOF (child exited)\n");
+                } else {
+                    fprintf(stderr, "[C] Python done wait error\n");
+                }
+
+            } else {
+                    perror("[C] send_save_request failed");
+            }
+
             //메모리 해제
             if (g_ai_objs) { free(g_ai_objs); g_ai_objs = NULL; g_ai_count = 0; }
-
-            // ===========================================================================
-            fprintf(stdout,
-                    "[C] CONTROL: AI+CAN 완료. speed=%d rpm=%d gear=%c gps(%.6f,%.6f) steer=%.3f\n",
-                    vehicle_data.speed, vehicle_data.rpm, vehicle_data.gear_state,
-                    vehicle_data.gps_x, vehicle_data.gps_y, vehicle_data.degree);
-            fflush(stdout);
-
-            // 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
             state_flag = 0;
             ai_state_flag = 0;
+            car_state_flag = 0;
             printf("\nfinish one cycle, next cycle will be started.\n");
 
-            // 필요하면 필수 두 데이터(GPS/STEER) 플래그만 리셋해서,
-            // 다시 두 데이터를 확보한 뒤 새로운 analyze 라운드를 도는 정책도 가능.
         }
+
+        if((ai_state_flag & AI_RESEULT_ERROR_FLAG) == AI_RESEULT_ERROR_FLAG){
+            //메모리 해제
+            if (g_ai_objs) { free(g_ai_objs); g_ai_objs = NULL; g_ai_count = 0; }
+            
+            printf("\nAI error occurred, next cycle will be started.\n");
+
+            car_state_flag |= 0x80; //AI 에러 플래그
+
+            if (send_save_request(stream_to_python, &vehicle_data, car_state_flag) == 0) {
+                // 최대 3000ms(3초) 동안 "done" 대기. 0을 주면 무제한 대기.
+                int wr = wait_python_done(stream_from_python, pipe_from_python_fd, 0);
+                if (wr == 0) {
+                    printf("[C] Python done OK\n");
+                } else if (wr == 1) {
+                    fprintf(stderr, "[C] Python done timeout\n");
+                } else if (wr == -2) {
+                    fprintf(stderr, "[C] Python EOF (child exited)\n");
+                } else {
+                    fprintf(stderr, "[C] Python done wait error\n");
+                }
+
+            } else {
+                    perror("[C] send_save_request failed");
+            }
+            state_flag = 0;
+            ai_state_flag = 0;
+            car_state_flag = 0;
+
+        }
+
+        // ===========================================================================
+        // fprintf(stdout,
+        //         "[C] CONTROL: AI+CAN 완료. speed=%d rpm=%d gear=%c gps(%.6f,%.6f) steer=%.3f\n",
+        //         vehicle_data.speed, vehicle_data.rpm, vehicle_data.gear_state,
+        //         vehicle_data.gps_x, vehicle_data.gps_y, vehicle_data.degree);
+        // fflush(stdout);
+
+        // 다음 사이클 준비: AI 관련 플래그/결과만 리셋 → CAN은 계속 최신 값 유지
+        
+        
+
+        // 필요하면 필수 두 데이터(GPS/STEER) 플래그만 리셋해서,
+        // 다시 두 데이터를 확보한 뒤 새로운 analyze 라운드를 도는 정책도 가능.
+        
 
     } // --- while(1) 루프 끝 ---
 
