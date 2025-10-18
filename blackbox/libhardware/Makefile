@@ -43,6 +43,7 @@ OBJS_C     = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR_C)/src/%.o,$(SRCS_C))
 OBJS_CXX   = $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR_CXX)/src/%.o,$(SRCS_CXX))
 OBJ_CJSON  = $(OBJ_DIR_C)/vendor/cJSON/cJSON.o
 OBJECTS    = $(OBJS_C) $(OBJS_CXX) $(OBJ_CJSON)
+LDLIBS    += -lm
 
 ifeq ($(strip $(SRCS_CXX)),)
   LINKER = $(CC)
