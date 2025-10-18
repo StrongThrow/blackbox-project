@@ -408,7 +408,7 @@ int main() {
 
     printf("[C] Main process start. Child PID: %d\n", (int)g_py_pid);
 
-    sleep(2000); //시작 대기 시간
+    sleep(2); //시작 대기 시간
 
     // --- 4-4. 메인 이벤트 루프: 장치의 심장 박동 ---
     while (1) {
