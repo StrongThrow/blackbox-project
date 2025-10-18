@@ -15,7 +15,9 @@ CFLAGS = -Wall -I../libhardware/include -I../vendor/cJSON
 # LDFLAGS: 링커 옵션
 # -L../build/lib: 'libhardware.so' 라이브러리 파일이 있는 경로를 지정합니다.
 # -lhardware: 'libhardware.so' 라이브러리와 링크하도록 지정합니다.
-LDFLAGS = -L../build/lib -lhardware
+LDFLAGS = -L../build/lib 
+
+LDLIBS  = -lhardware -lm  
 
 # --- 소스 및 결과물 경로 정의 ---
 SRC = src/main.c
@@ -37,7 +39,7 @@ all: $(TARGET)
 $(TARGET): $(SRC) $(LIB_DEPENDENCY)
 	@echo "Compiling and linking application: $@"
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
 
 # 'make clean' 실행 시 컴파일 결과물을 삭제하는 규칙
 clean:
