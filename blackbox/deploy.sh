@@ -35,8 +35,8 @@ scp build/bin/blackbox_main ${PI_USER_HOST}:${DEST_DIR}/bin/
 echo "    - 공유 라이브러리 (libhardware.so) 전송 중..."
 scp build/lib/libhardware.so ${PI_USER_HOST}:${DEST_DIR}/lib/
 
-#echo "    - AI 서버 파일 전송 중..."
-#scp -r ai/* ${PI_USER_HOST}:${DEST_DIR}/ai/
+echo "    - AI 서버 파일 전송 중..."
+scp -r ai/* ${PI_USER_HOST}:${DEST_DIR}/ai/
 
 echo "    - Assets 파일 전송 중..."
 scp -r assets/* ${PI_USER_HOST}:${DEST_DIR}/assets/
