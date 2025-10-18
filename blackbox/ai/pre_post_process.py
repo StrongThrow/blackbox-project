@@ -76,7 +76,7 @@ def post_proc(in_queue, in_meta_queue, out_queue, post_proc_onnx_path, demo) -> 
 
         results = sess_post_proc.run(output_names, pp_in)
         result = np.stack((np.array(transformer_output['petrv2_repvggB0_transformer_pp_800x320/conv41']), np.array(results[0])),axis=0)
-
+        
         while not demo.get_terminate():
             try:
                 out_queue.put((result, meta_data), block=True, timeout=0.5)

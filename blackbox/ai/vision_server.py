@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-vision_server.py (간소화 안정화 버전)
 
-파이프라인:
-6캠 실시간 입력 → Backbone(HEF, UINT8) → (host quant) → Transformer(HEF, UINT8) → (dequant) → ONNX Postproc(float) → 디코드 → BEV 시각화
-"""
 import os
 import sys
 import time
@@ -27,6 +21,7 @@ import core
 import demo_manager
 import async_api
 import visualization
+import recorder
 
 
 # ---- Hailo ----
@@ -50,12 +45,27 @@ BACKBONE_HEF    = os.path.join(MODELS_DIR, "petrv2_repvggB0_backbone_pp_800x320.
 TRANSFORMER_HEF = os.path.join(MODELS_DIR, "petrv2_repvggB0_transformer_pp_800x320.hef")
 POSTPROC_ONNX   = os.path.join(MODELS_DIR, "petrv2_postprocess.onnx")
 MATMUL_NPY      = os.path.join(MODELS_DIR, "matmul.npy")
+MAP_PATH       = os.path.join(MODELS_DIR, "map.png")
 MAX_QUEUE_SIZE = 3
 # BEV 렌더링
 BEV_SIZE = 640
+BUF_BEV_MAP = BEV_SIZE * 1.5 # 회전 생각해서
 XY_RANGE_M = 61.2
-LINE_W = 2
+LINE_W = 2  # pixel
+CARLA_POS_MAX = 230 #pixel
+CARLA_POS_MIN = -230 #pixel
+MAP_SIZE = 8192  # pixels
+MAP_SCALE = MAP_SIZE / (CARLA_POS_MAX - CARLA_POS_MIN)  
 
+# 이벤트 비트 설정
+EVENT_ACCEL         = 1 << 0
+EVENT_BRAKE         = 1 << 1
+EVENT_PEDESTRIAN    = 1 << 2
+EVENT_TRUCK         = 1 << 3
+EVENT_MOTORCYCLE    = 1 << 4
+EVENT_PUNK          = 1 << 5 
+EVENT_TEMP1         = 1 << 6
+EVENT_TEMP2         = 1 << 7
 
 def log(msg: str):
     print(f"[Py LOG] {msg}", file=sys.stderr, flush=True)
@@ -75,43 +85,108 @@ def _np_to_py(obj):
     if isinstance(obj, (list, tuple)):
         return [_np_to_py(v) for v in obj]
     return obj
-
+def q1(x): return float(np.around(x, 1))  
 def _build_json_msg(dets_dict, meta=None):
-    item = {}
-    if isinstance(dets_dict, dict) and dets_dict.get('pts_bbox'):
-        item0 = dets_dict['pts_bbox'][0]
-        item = {
-            "boxes_3d": _np_to_py(item0.get("boxes_3d", [])),
-            "scores_3d": _np_to_py(item0.get("scores_3d", [])),
-            "labels_3d": _np_to_py(item0.get("labels_3d", [])),
-        }
-    return {
-        "status": "success",
-        "detections": { "pts_bbox": [item] if item else [] },
-        # meta는 일단 None. post_proc가 메타를 안 내보내므로 안전하게 비워둠
-        "meta": meta or {}
-    }
+ 
+    objs = []
+    try:
+        if isinstance(dets_dict, dict) and dets_dict.get('pts_bbox'):
+            item0 = dets_dict['pts_bbox'][0] or {}
+            boxes  = np.asarray(item0.get("boxes_3d", []))
+            scores = np.asarray(item0.get("scores_3d", []))
+            labels = np.asarray(item0.get("labels_3d", []))
+
+            if boxes.ndim == 1:  # (7,) 같은 단일 케이스 방어
+                boxes = boxes.reshape(1, -1)
+
+            N = boxes.shape[0] if boxes.size else 0
+            for i in range(N):
+                b = boxes[i]
+                l = labels[i]
+                obj = {
+                    "label": _np_to_py(l),      
+                    "x":     q1(b[0]),  # 0번
+                    "y":     q1(b[1]),  # 1번
+                    "ax": q1(b[7]),  # 7번
+                    "ay":  q1(b[8]),  # 8번 
+                }
+                log(f"[DEBUG] box {i}: {obj}")  # 디버그 로그
+                if i < len(scores): obj["score"] = _np_to_py(scores[i])
+                if i < len(labels): obj["label"] = _np_to_py(labels[i])
+                objs.append(obj)
+    except Exception as e:
+        # 디코드가 비정상이면 빈 배열 + 상태만 리턴
+        pass
+
+    return objs          # ← 요청한 배열 키
+    
+
 
 def json_sender_proc(det_q):
     import sys, json
-    import pre_post_process as pp  # ← 이미 import되어 있으면 생략
+    import pre_post_process as pp
     while True:
         try:
             item = det_q.get(timeout=1)
         except _queue.Empty:
             continue
 
-        # post_proc가 (pp_output, meta) 를 넣는 구조
         meta = None
         if isinstance(item, tuple) and len(item) == 2:
             pp_output, meta = item
-            dets_dict = pp.decode(pp_output)   # ← ★ 여기서 디코딩
+            try:
+                dets_dict = pp.decode(pp_output)
+            except Exception:
+                dets_dict = {}
         else:
-            dets_dict = item  # 이미 dict 형태면 그대로
+            dets_dict = item if isinstance(item, dict) else {}
 
-        msg = _build_json_msg(dets_dict, meta=meta)
-        sys.stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        obj = {
+            "objects": _build_json_msg(dets_dict, meta=meta),
+        }
+        log(f"[JSON Sender] Sending {len(obj['objects'])} objects") 
+        log(f"[DEBUG] JSON: {type(obj)}")  
+        # ✅ stdout에는 JSON 한 줄만! (부모가 파싱하기 쉽게)
+        print(json.dumps(obj, ensure_ascii=False))
         sys.stdout.flush()
+
+def parse_command(line: str):
+    """
+    'analyze {json}' 형태에서 payload만 파싱 (없어도 동작은 하게 관대하게 처리)
+    """
+    line = line.strip()
+    if not line:
+        return None, None
+    
+    if line.startswith("analyze"):
+
+        payload = None
+        # 'analyze ' 뒤에 JSON이 붙어 있을 수도 있음
+        if len(line) > len("analyze"):
+            rest = line[len("analyze"):].strip()
+            if rest:
+                try:
+                    payload = json.loads(rest)
+                except Exception:
+                    payload = None
+        return "analyze", payload
+    
+
+    elif line.startswith("draw"):
+
+        payload = None
+        # 'analyze ' 뒤에 JSON이 붙어 있을 수도 있음
+        if len(line) > len("draw"):
+            rest = line[len("draw"):].strip()
+            if rest:
+                try:
+                    payload = json.loads(rest)
+                except Exception:
+                    payload = None
+        return "draw", payload
+    
+
+
 # === Add to vision_server.py (상단 유틸 근처) ===
 import math
 import numpy as np
@@ -187,7 +262,7 @@ def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
             continue
 
         # 코너 4점(m) → 픽셀
-        corners_m = _rot_rect_corners(cx, cy, w, l, yaw)
+        corners_m = _rot_rect_corners(cx, cy, w, l, -yaw)
         corners_px = _meters_to_pixels(corners_m, (ox, oy), scale)
 
         # 박스
@@ -248,38 +323,35 @@ def make_mosaic_grid(img_list, rows=2, cols=3, tile_wh=(400,160), pad=4, order=N
     cv2.rectangle(canvas, (0,0), (grid_w-1, grid_h-1), (40,40,40), 1)
     return canvas
 
-def bev_viz_proc(in_queue):
+def bev_viz_proc(in_queue,payload,win='BEV'):
     import cv2, numpy as np
     import pre_post_process as pp
-
-    win = 'BEV'
-    print("[BEV] proc start")  # 디버그 로그
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(win, 700, 700)
-
     last_dets = None  # 마지막 디텍션 유지
 
-    while True:
-        try:
-            item = in_queue.get(timeout=0.5)
-            if isinstance(item, tuple) and len(item) == 2:
-                pp_output, meta = item
-                last_dets = pp.decode(pp_output)
-            else:
-                last_dets = item
-        except _queue.Empty:
-            # 새 입력이 없어도 이전/빈 캔버스를 계속 렌더
-            pass
+    try:
+        item = in_queue.get(timeout=0.5)
+        if isinstance(item, tuple) and len(item) == 2:
+            pp_output, meta = item
+            last_dets = pp.decode(pp_output)
+        else:
+            last_dets = item
+    except _queue.Empty:
+        # 새 입력이 없어도 이전/빈 캔버스를 계속 렌더
+        pass
+    # value
+    # speed
+    # tires
+    # 로 올거임
+    payload['speed']
+    bev = make_bev_canvas(size=640, xy_range=XY_RANGE_M)
+    if last_dets:
+        bev = draw_bev_boxes_on(bev, last_dets, score_thresh=0.3, xy_range=XY_RANGE_M)
 
-        bev = make_bev_canvas(size=640, xy_range=XY_RANGE_M)
-        if last_dets:
-            bev = draw_bev_boxes_on(bev, last_dets, score_thresh=0.3, xy_range=XY_RANGE_M)
+    cv2.imshow(win, bev)
 
-        cv2.imshow(win, bev)
-        if cv2.waitKey(1) == 27:
-            break
 
-    cv2.destroyAllWindows()
+# =================== JSON
+
 
 
 
@@ -361,19 +433,19 @@ def fanout_proc(src_q, dst_qs):
             item = src_q.get(timeout=0.5)
         except _q.Empty:
             continue
-        if item == STOP:
-            # 자식들에도 STOP 전달
-            for q in dst_qs:
-                try: q.put_nowait(STOP)
-                except: pass
-            break
+        # if item == STOP:
+        #     # 자식들에도 STOP 전달
+        #     for q in dst_qs:
+        #         try: q.put_nowait(STOP)
+        #         except: pass
+        #     break
         # 각 목적지 큐로 non-blocking 전송 (풀이면 드롭)
         for q in dst_qs:
             try: q.put_nowait(item)
             except: pass
 # =================== 메인 ===================
 def main():
-    log("Simple BEV server starting...")
+    log("Simple BEV server starting")
 
     # GStreamer 시작
     Gst.init(None)
@@ -381,7 +453,22 @@ def main():
     for r in receivers:
         r.init_pipeline()
         r.start()
+    
+    # Map 데이터 로드
+    
+    map_image = cv2.imread(MAP_PATH)
+    map_child = None
 
+    # Recorder 초기화 시작
+    # rec = recorder.ENC_PARAMSTimeWindowEventRecorder6(
+    #     out_dir="/home/root/blackbox/event6",
+    #     size=(800, 450),
+    #     pre_secs=5.0, post_secs=5.0,
+    #     retention_secs=60.0,
+    #     save_as="jpg"  # jpg가 디버깅/속도에 유리. mp4 원하면 "mp4"
+    # )
+    # Recorder 초기화 끝
+    
 
     fps_calculator = fps_calc.FPSCalc(2)
     queues = []
@@ -391,6 +478,7 @@ def main():
     transformer_pp_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
     pp_3dnms_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
     nms_send_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
+
 
     queues.append(bb_tranformer_meta_queue)
     queues.append(transformer_pp_meta_queue)
@@ -430,69 +518,111 @@ def main():
         #                                 args=(args.input, args.data, nms_send_queue,
         #                                 fps_calculator, nusc)))
         # 스타트는 한 번만
+        log("multi process starting...")
         for t in threads: t.start()
         for p in processes: p.start()
 
         # fanout
         fan = multiprocessing.Process(target=fanout_proc, args=(pp_3dnms_queue, [det_for_json_q, det_for_bev_q]))
-        fan.daemon = True
+        fan.daemon = False
         fan.start()
 
         # 각 소비자에는 자기 큐만 전달
-        # json_out = multiprocessing.Process(target=json_sender_proc, args=(det_for_json_q,))
-        # json_out.daemon = True
-        # json_out.start()
+        json_out = multiprocessing.Process(target=json_sender_proc, args=(det_for_json_q,))
+        json_out.daemon = False
+        json_out.start()
 
-        bev_proc = multiprocessing.Process(target=bev_viz_proc, args=(det_for_bev_q,), daemon=False)
-        bev_proc.start()
+        # bev_proc = multiprocessing.Process(target=bev_viz_proc, args=(det_for_bev_q,), daemon=False)
+        # bev_proc.start()
         token  = 0
+        recodCMD = 0
+
+        # BEV 그려주는걸 따로 빼야하니깐 처음 만들어줌
+        win = 'BEV'
+        log("[BEV] proc start")  # 디버그 로그
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(win, 700, 700)
+        log("init done")
         try :
             while True:
-                # 1) 6캠 프레임 수집 + 예제 동일 전처리(800x450 → y=130~450 크롭 → 800x320)
-                images_after_pre = []
-                time.sleep(0.2)
-                for i in range(NUM_CAMS):
-                    f = receivers[i].latest_frame
-                    if f is None:
-                        f = np.zeros((SRC_H, SRC_W, 3), np.uint8)
-                    img = cv2.resize(f, (800, 450))
-                    x, y, width, height = 0, 130, 800, 450  
-                    img = img[y:height, x:x + width]
 
-                    images_after_pre.append(img)
-                cam_order = [0, 1, 2, 3, 4, 5]
-
-                # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
-                # tile_wh=(400,160) → 전체 약 (3*400 + 여백) x (2*160 + 여백) ≈ 1220x344
-                mosaic = make_mosaic_grid(
-                    images_after_pre,
-                    rows=2, cols=3,
-                    tile_wh=(400, 160),
-                    pad=6,
-                    order=cam_order,
-                    draw_index=True
-                )
-                cv2.imshow("Cams 3x2", mosaic)
-                cv2.waitKey(1)
-                print(f"[Main] Got {len(images_after_pre)} frames")
-
-                frames_np = np.asarray(images_after_pre, dtype=np.uint8)  
-                #token = time.time_ns()
-                token = token + 1
+                line = sys.stdin.readline()# 0.2 초를 보장해줌
                 
-                try:
-                    camera_in_q.put((frames_np, {"token": token}), block=False)
-                    now = time.time()
-                    localtime = time.localtime(now)
-                    hi = time.strftime("%Y-%m-%d %H:%M:%S",localtime)
-                    print(f"{hi}[Main] size : {camera_in_q.qsize()}")
-                except:
-                    _ = camera_in_q.get()  # 가장 오래된 프레임 드롭
-                    print("[Main] WARN: camera_in_q full, dropping frame")
-                    pass
+                if not line:
+                    log("stdin closed. exiting.")
+                    break
+
+                cmd, payload = parse_command(line)
+                if cmd != "analyze":
+                    log(f"ignored line: {line.strip()}")
+                    continue
+
+                if cmd == "analyze":
+                    recodCMD = recodCMD + 1
+                    # 1) 6캠 프레임 수집 + 예제 동일 전처리(800x450 → y=130~450 크롭 → 800x320)
+                    images_after_pre = []
+                    images_record = []
+                    for i in range(NUM_CAMS):
+                        f = receivers[i].latest_frame
+                        if f is None:
+                            f = np.zeros((SRC_H, SRC_W, 3), np.uint8)
+                        img = cv2.resize(f, (800, 450))
+                        images_record.append(img.copy())
+                        x, y, width, height = 0, 130, 800, 450  
+                        img = img[y:height, x:x + width]
+
+                        images_after_pre.append(img)
+
+                    #rec.push_batch(images_after_pre)
+                    cam_order = [0, 1, 2, 3, 4, 5]
+
+                    # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
+                    # tile_wh=(400,160) → 전체 약 (3*400 + 여백) x (2*160 + 여백) ≈ 1220x344
+                    mosaic = make_mosaic_grid(
+                        images_after_pre,
+                        rows=2, cols=3,
+                        tile_wh=(400, 160),
+                        pad=6,
+                        order=cam_order,
+                        draw_index=True
+                    )
+                    cv2.imshow("Cams 3x2", mosaic)
+                    cv2.waitKey(1)
+                    log(f"[Main] Got {len(images_after_pre)} frames")
+
+                    frames_np = np.asarray(images_after_pre, dtype=np.uint8)  
+                    #token = time.time_ns()
+                    token = token + 1
                     
-                #print(json.dumps({"status": "success", "detections": detections}, ensure_ascii=False))
-                sys.stdout.flush()
+                    try:
+                        camera_in_q.put((frames_np, {"token": token}), block=False)
+                        now = time.time()
+                        localtime = time.localtime(now)
+                        hi = time.strftime("%Y-%m-%d %H:%M:%S",localtime)
+                        log(f"{hi}[Main] size : {camera_in_q.qsize()}")
+                    except:
+                        _ = camera_in_q.get()  # 가장 오래된 프레임 드롭
+                        log("[Main] WARN: camera_in_q full, dropping frame")
+                        pass
+                        
+                    #print(json.dumps({"status": "success", "detections": detections}, ensure_ascii=False))
+                    # sys.stdout.flush()
+                    log("wating draw cmd...")
+                    line = sys.stdin.readline()# draw   
+                    cmd, payload = parse_command(line)
+                    if cmd != "draw":
+                        log(f"ignored line: {line.strip()}")
+                        continue
+                    log(f"received cmd: {cmd}")
+                    if cmd == "draw":
+                        log(f"[BEV] draw cmd received")  # 디버그 로그
+                        log(f"[BEV] payload: {payload}")  # 디버그 로그
+                        bev_viz_proc(det_for_bev_q, payload, win)# 그려주는건 따로 
+                        log("end draw ...")
+
+            
+                print("done", flush=True)        
+
         except KeyboardInterrupt:
             demo_mng.set_terminate()
 
