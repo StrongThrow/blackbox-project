@@ -46,6 +46,9 @@ TRANSFORMER_HEF = os.path.join(MODELS_DIR, "petrv2_repvggB0_transformer_pp_800x3
 POSTPROC_ONNX   = os.path.join(MODELS_DIR, "petrv2_postprocess.onnx")
 MATMUL_NPY      = os.path.join(MODELS_DIR, "matmul.npy")
 MAP_PATH       = os.path.join(MODELS_DIR, "map.png")
+from pathlib import Path
+RECORDER_PATH = Path(os.environ.get("BB_OUT_DIR", Path.home() / "blackbox" / "event6"))
+RECORDER_PATH.mkdir(parents=True, exist_ok=True)
 MAX_QUEUE_SIZE = 3
 # BEV 렌더링
 BEV_SIZE = 640
@@ -188,6 +191,52 @@ def parse_command(line: str):
 
 
 # === Add to vision_server.py (상단 유틸 근처) ===
+
+# =================== map ====================
+def world_to_pixel(x, y):
+    """CARLA y-up → 이미지 y-down 보정 포함"""
+    px = (x - CARLA_POS_MIN) * MAP_SCALE
+    py = (CARLA_POS_MAX - y) * MAP_SCALE
+    return int(round(px)), int(round(py))
+
+def pixel_to_world(px, py):
+    x = px / MAP_SCALE + CARLA_POS_MIN
+    y = CARLA_POS_MAX - py / MAP_SCALE
+    return float(x), float(y)
+
+def crop_map_by_world_rect(
+    map_image, center_xy, half_width_m, half_height_m=None,
+    clamp=True, copy=True
+):
+    if half_height_m is None:
+        half_height_m = half_width_m
+
+    cx, cy = center_xy
+    # 중심점 픽셀
+    cpx, cpy = world_to_pixel(cx, cy)
+
+    # 반폭/반높이를 픽셀로 변환
+    half_w_px = int(round(half_width_m * MAP_SCALE))
+    half_h_px = int(round(half_height_m * MAP_SCALE))
+
+    # 좌표 계산 (주의: y-down)
+    x0 = cpx - half_w_px
+    x1 = cpx + half_w_px
+    y0 = cpy - half_h_px
+    y1 = cpy + half_h_px
+
+    # 범위 보정(clamp)
+    if clamp:
+        x0 = max(0, x0); y0 = max(0, y0)
+        x1 = min(MAP_SIZE - 1, x1); y1 = min(MAP_SIZE - 1, y1)
+
+    # 유효성 체크
+    if x0 >= x1 or y0 >= y1:
+        raise ValueError("ROI가 이미지 범위를 완전히 벗어났습니다.")
+
+    roi = map_image[y0:y1, x0:x1]  # OpenCV는 [행=y, 열=x] 순서
+    return roi.copy() if copy else roi, (x0, y0, x1, y1)
+
 import math
 import numpy as np
 import cv2
@@ -216,21 +265,29 @@ def _meters_to_pixels(xy, origin_px, scale):
     xy_px[:,1] = origin_px[1] - xy[:,1]*scale  # y축 뒤집기(위가 +)
     return xy_px.astype(np.int32)
 
-def make_bev_canvas(size=640, xy_range=61.2):
-    bev = np.ones((size, size, 3), np.uint8)*255
-    # 중심 십자선/격자
-    ox = oy = size//2
-    cv2.line(bev, (0, oy), (size, oy), (220,220,220), 1)
-    cv2.line(bev, (ox, 0), (ox, size), (220,220,220), 1)
-    # 10m grid
-    scale = size/(2*xy_range)
-    for m in range(-60, 61, 10):
-        y = int(oy - m*scale)
-        x = int(ox + m*scale)
-        cv2.line(bev, (0,y), (size,y), (240,240,240), 1)
-        cv2.line(bev, (x,0), (x,size), (240,240,240), 1)
-    # ego box
-    cv2.rectangle(bev, (ox-5, oy-10), (ox+5, oy+10), (0,255,0), 2)
+def make_bev_canvas(yaw, x, y, map_image, size=640, xy_range=61.2):
+    # 1) GPS/월드 좌표 → 픽셀 좌표
+    cx, cy = world_to_pixel(x, y)
+
+    # 2) yaw 단위 보정: 라디안/도 섞여 들어올 수 있으니 자동 판별
+    #   - |yaw| > 3.2면 도(deg)라고 보고 그대로 사용
+    #   - 아니면 라디안(rad) → 도(deg)로 변환
+    if abs(float(yaw)) > 3.2:
+        angle_deg = -float(yaw)
+    else:
+        angle_deg = -math.degrees(float(yaw))
+
+    # 3) 회전 & 크롭 (반드시 언패킹!)
+    bev= rotate_and_crop_constant(
+        map_image,
+        angle_deg=angle_deg,
+        crop_w=size, crop_h=size,
+        center=(cx, cy)
+    )
+
+    # 4) 중심 마커
+    ox = oy = size // 2
+    cv2.rectangle(bev, (ox-5, oy-10), (ox+5, oy+10), (0, 255, 0), 2)
     return bev
 
 def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
@@ -323,7 +380,7 @@ def make_mosaic_grid(img_list, rows=2, cols=3, tile_wh=(400,160), pad=4, order=N
     cv2.rectangle(canvas, (0,0), (grid_w-1, grid_h-1), (40,40,40), 1)
     return canvas
 
-def bev_viz_proc(in_queue,payload,win='BEV'):
+def bev_viz_proc(map_image,in_queue, payload,win='BEV'):
     import cv2, numpy as np
     import pre_post_process as pp
     last_dets = None  # 마지막 디텍션 유지
@@ -342,19 +399,65 @@ def bev_viz_proc(in_queue,payload,win='BEV'):
     # speed
     # tires
     # 로 올거임
+    payload, anlalyze_paylaod =  payload
+    yaw = anlalyze_paylaod['steer']
+    gps = anlalyze_paylaod['gps']
+    x,y = gps
+    log(f"[BEV] position x:{x}, y:{y}, yaw:{yaw}")
     payload['speed']
-    bev = make_bev_canvas(size=640, xy_range=XY_RANGE_M)
+    bev = make_bev_canvas(yaw, x,y,map_image,size=640, xy_range=XY_RANGE_M)
     if last_dets:
         bev = draw_bev_boxes_on(bev, last_dets, score_thresh=0.3, xy_range=XY_RANGE_M)
 
     cv2.imshow(win, bev)
 
 
-# =================== JSON
 
+def rotate_and_crop_constant(img, angle_deg, crop_w, crop_h,
+                             center=None,  # (px, py) 회전/크롭 중심. None이면 이미지 중앙
+                             interpolation=cv2.INTER_LINEAR,
+                             border_value=(0,0,0)):
 
+    import math, numpy as np, cv2
+    H, W = img.shape[:2]
+    cx, cy = center
 
+    # 1) 회전에 충분한 "사전 크롭" 크기(r): 대각선 절반 + 여유
+    r = int(math.ceil(0.5 * math.hypot(crop_w, crop_h))) + 4  # 640 → r≈454
 
+    x0 = max(0, int(cx - r)); y0 = max(0, int(cy - r))
+    x1 = min(W, int(cx + r)); y1 = min(H, int(cy + r))
+
+    roi = img[y0:y1, x0:x1]
+    if roi.size == 0:
+        # 밖으로 나갔을 때 빈 캔버스 반환
+        return np.full((crop_h, crop_w, img.shape[2] if img.ndim==3 else 1),
+                       border_value, dtype=img.dtype)
+
+    # 2) ROI 기준 중심 좌표
+    rcx = cx - x0; rcy = cy - y0
+
+    # 3) ROI만 회전
+    M = cv2.getRotationMatrix2D((rcx, rcy), angle_deg, 1.0)
+    rotated = cv2.warpAffine(roi, M, (roi.shape[1], roi.shape[0]),
+                             flags=interpolation,
+                             borderMode=cv2.BORDER_CONSTANT,
+                             borderValue=border_value)
+
+    # 4) 회전한 ROI에서 중앙 crop_w×crop_h만 떼기
+    x0c = int(round(rcx - crop_w/2)); y0c = int(round(rcy - crop_h/2))
+    x1c = x0c + crop_w; y1c = y0c + crop_h
+
+    # 겹치는 영역만 복사 (경계 넘어가면 0으로 채움)
+    out = np.full((crop_h, crop_w, rotated.shape[2] if rotated.ndim==3 else 1),
+                  border_value, dtype=rotated.dtype)
+    sx0 = max(0, x0c); sy0 = max(0, y0c)
+    sx1 = min(rotated.shape[1], x1c); sy1 = min(rotated.shape[0], y1c)
+    if sx0 < sx1 and sy0 < sy1:
+        dx0 = sx0 - x0c; dy0 = sy0 - y0c
+        out[dy0:dy0+(sy1-sy0), dx0:dx0+(sx1-sx0)] = rotated[sy0:sy1, sx0:sx1]
+
+    return out
 # =================== GStreamer 수신 ===================
 class GstVideoReceiver:
     def __init__(self, port: int):
@@ -460,13 +563,13 @@ def main():
     map_child = None
 
     # Recorder 초기화 시작
-    # rec = recorder.ENC_PARAMSTimeWindowEventRecorder6(
-    #     out_dir="/home/root/blackbox/event6",
-    #     size=(800, 450),
-    #     pre_secs=5.0, post_secs=5.0,
-    #     retention_secs=60.0,
-    #     save_as="jpg"  # jpg가 디버깅/속도에 유리. mp4 원하면 "mp4"
-    # )
+    rec = recorder.TimeWindowEventRecorder6(
+         out_dir=str(RECORDER_PATH),
+         size=(800, 450),
+         pre_secs=5.0, post_secs=5.0,
+         retention_secs=60.0,
+         save_as="mp4"  # jpg가 디버깅/속도에 유리. mp4 원하면 "mp4"
+    )
     # Recorder 초기화 끝
     
 
@@ -543,6 +646,7 @@ def main():
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(win, 700, 700)
         log("init done")
+         
         try :
             while True:
 
@@ -552,7 +656,7 @@ def main():
                     log("stdin closed. exiting.")
                     break
 
-                cmd, payload = parse_command(line)
+                cmd, anlalyze_paylaod = parse_command(line)
                 if cmd != "analyze":
                     log(f"ignored line: {line.strip()}")
                     continue
@@ -573,7 +677,7 @@ def main():
 
                         images_after_pre.append(img)
 
-                    #rec.push_batch(images_after_pre)
+                    rec.push_batch(images_after_pre)
                     cam_order = [0, 1, 2, 3, 4, 5]
 
                     # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
@@ -617,7 +721,10 @@ def main():
                     if cmd == "draw":
                         log(f"[BEV] draw cmd received")  # 디버그 로그
                         log(f"[BEV] payload: {payload}")  # 디버그 로그
-                        bev_viz_proc(det_for_bev_q, payload, win)# 그려주는건 따로 
+
+                        bev_viz_proc(map_image ,det_for_bev_q, (payload, anlalyze_paylaod), win)# 그려주는건 따로 
+                        if recodCMD == 50 :
+                            rec.trigger("event")
                         log("end draw ...")
 
             
