@@ -1,53 +1,105 @@
-#프로젝트 이름
+# 위험판단 블랙박스
 
-위험판단 블랙박스
+위험판단 블랙박스는 AI를 활용한 블랙박스 시스템으로, 기존 블랙박스에서 알 수 없는 위험을 판단합니다.
 
-##소개
+<!-- GIF나 이미지 데모 추가 가능: ![데모 GIF](img/demo.gif) -->
 
-AI블랙박스는 기존 블랙박스에서는 알 수 없는 
+# 목차
 
-##설치 방법
+- [왜?](#왜)
+- [설치](#설치)
+  - [방법 1: git clone](#방법-1-git-clone)
+- [의존성](#의존성)
+- [사용법](#사용법)
+- [출력 구조](#출력-구조)
 
-git clone https://github.com/~
+### 왜?
 
-##()
+기존 블랙박스에서는 알 수 없는 위험을 AI로 판단하기 위해 이 프로젝트를 만들었습니다. 이 도구는 다음과 같은 기능을 제공합니다:
 
+- 시스템에서 직접 위험을 판단.
+- 사고 전후의 원인 파악에 도움.
+- 
 
-1. python3.8 의존성 설치
-sudo apt update
-sudo apt install -y build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev curl git libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
+이 프로젝트는 이러한 요구사항을 모두 충족합니다.
 
-2. pyenv 설치
-curl https://pyenv.run | bash
+### 설치
 
-3. vi ~/.bashrc 변경
+---
+
+#### 방법 1: git clone
+
+```bash
+$ git clone https://github.com/~
+$ cd ~
+```
+
+### 의존성 설치
+--------
+
+- python3.8
+- hailo SDK
+- requirements.txt
+
+- python3.8 의존성 설치
+```bash
+$ sudo apt update
+$ sudo apt install -y build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev curl git libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
+```
+
+- pyenv 설치
+```bash
+$ curl https://pyenv.run | bash
+```
+
+- vi ~/.bashrc 변경
+```bash
 export PATH="$HOME/.pyenv/bin:$PATH"
 eval "$(pyenv init -)"
 eval "$(pyenv virtualenv-init -)"
 exec $SHELL
+```
 
-4. python3.8 설치 & 적용
-pyenv install 3.8.0
-pyenv version
-pyenv global 3.8.0
+- python3.8 설치 & 적용
+```bash
+$ pyenv install 3.8.0
+$ pyenv version
+$ pyenv global 3.8.0
+```
 
-5. requirements 설치
-가상환경 접속 후
-pip install -r requirements.txt
+- requirements 설치
+```bash
+#가상환경 접속 후
+$ pip install -r requirements.txt
+```
 
-6. hailo SDK 설치
-sudo dpkg -i hailort_<version>_<architecture>.deb
-sudo dpkg -i hailort-pcie-driver_<version>_all.deb
-tar -xvf hailort
+- hailo SDK 설치
+```bash
+$ sudo dpkg -i hailort_<version>_<architecture>.deb
+$ sudo dpkg -i hailort-pcie-driver_<version>_all.deb
+$ tar -xvf hailort
+```
 
+- SDK 설치 후 확인
+```bash
+$ dpkg -l | grep hailo
+$ hailortcli fw-control identify
+```
 
-7. SDK 설치 후 확인
-dpkg -l | grep hailo
-hailortcli fw-control identify
+- 의존성 오류 시
+```bash
+$ sudo apt --fix-broken install
+```
 
-8. 의존성 오류 시
-sudo apt --fix-broken install
+### 사용법
+-----
+```bash
+$ python vision_server.py
+```
 
-##사용법
+### 출력 구조
+-------
+```bash
+트리구조 삽입 바람
+```
 
-python vision_server.py
