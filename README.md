@@ -26,7 +26,6 @@
 
 ### 개발환경
 ---
-| 개발 환경                                    |                                    |
 | -------------------------------------------|----------------------------------- |
 | RaspBerryPi5                               |<img width="204" height="192" alt="download" src="https://github.com/user-attachments/assets/1967e8f2-04b4-4823-a7f9-283afba1b94f" />|
 | Hailo-8                                    |![download](https://github.com/user-attachments/assets/376ba796-aa6b-4b17-a0df-91064f90510e)|
@@ -113,6 +112,7 @@ $ python vision_server.py
 ```bash
 트리구조 삽입 바람
 ```
+
 
 
 
