@@ -40,7 +40,7 @@ $ cd ~
 - python3.8
 - hailo SDK
 - requirements.txt
-
+---
 - python3.8 의존성 설치
 ```bash
 $ sudo apt update
@@ -102,4 +102,5 @@ $ python vision_server.py
 ```bash
 트리구조 삽입 바람
 ```
+
 
