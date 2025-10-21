@@ -16,9 +16,10 @@ AI 기반으로 차량의 위험 상황을 실시간 분석하고, 사고 전후
 - [개발 환경](#개발-환경)
 - [하드웨어 구성](#하드웨어-구성)
 - [설치](#설치)
-  - [Ubuntu-RPi 크로스 컴파일 가이드](#Ubuntu-RPi-크로스-컴파일-가이드)
+  - [Ubuntu-RPi 크로스 컴파일 환경 구성](#Ubuntu-RPi-크로스-컴파일-환경-구성)
+  - [컴파일 방법](#컴파일-방법법)
   - [git clone](#git-clone)
-  - [의존성](#의존성)
+  - [의존성 설치](#의존성-설치)
 - [사용법](#사용법)
 - [출력 구조](#출력-구조)
 - [결과 및 시연](#결과-및-시연)
@@ -139,37 +140,59 @@ Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 
 ### 설치
 
 ---
-#### Ubuntu-RPi 크로스 컴파일 가이드
+#### Ubuntu-RPi 크로스 컴파일 환경 구성
 1. submodule 다운로드
 ```bash
 $ git submodule update --init --recursive
 ```
 2. 크로스 컴파일용 라이브러리 설치
-   a. ARM64 아키텍처 추가
-     i. ARM64 아키텍처 추가
-     ```bash
-     $ sudo dpkg --add-architecture arm64
-     ```
-     ii. /etc/apt/sources.list 파일 수정
-     ```bash
-     $ sudo vi /etc/apt/sources.list
-     ```
-     iii. ARM용 저장소 주소 추가
-     ```bash
-     # ARM64 아키텍처를 위한 Ubuntu Ports 저장소
-     $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
-     $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
-     $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse
-     $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
-     ```
-   b. ARM64용 패키지를 다운로드
-   ```bash
-   $ sudo apt update
-   ```
-   c. ARM용 GStreamer 개발 라이브러리 설치
-   ```bash
-   $ sudo apt install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64
-   ```
+
+  - ARM64 아키텍처 추가
+  ```bash
+  $ sudo dpkg --add-architecture arm64
+  ``` 
+  - /etc/apt/sources.list 파일 수정
+  ```bash
+  $ sudo vi /etc/apt/sources.list
+  ```
+  - ARM용 저장소 주소 추가
+  ```bash
+  # ARM64 아키텍처를 위한 Ubuntu Ports 저장소
+  $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+  $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+  $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse
+  $ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+  ```
+   
+  - ARM64용 패키지를 다운로드
+  ```bash
+  $ sudo apt update
+  ```
+  - ARM용 GStreamer 개발 라이브러리 설치
+  ```bash
+  $ sudo apt install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64
+  ```
+---
+
+#### 컴파일 방법
+```bash
+$ cd blackbox
+```
+- x86 빌드
+```bash
+$ make
+```
+
+- arm 빌드
+```bash
+$ make cross
+```
+
+- arm 빌드 및 타겟 보드로 전송(scp)
+```bash
+$ make deploy PI_USER=(USER_NAME) PI_IP=(USER_PASSWORD)
+```
+
 ---
 #### git clone
 
@@ -266,6 +289,7 @@ $ python vision_server.py
 ```bash
 추가 바람
 ```
+
 
 
 
