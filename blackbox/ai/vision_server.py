@@ -9,7 +9,6 @@ from queue import Queue
 
 import numpy as np
 import cv2
-import torch
 import onnxruntime as ort
 
 #-------------------------------imsi-----------------------------------
