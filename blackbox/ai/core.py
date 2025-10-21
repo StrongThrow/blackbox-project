@@ -184,7 +184,7 @@ import queue as pyqueue
 import time, os, numpy as np
 
 def transformer(target, hef_path, matmul_path, queue_in,
-                queue_meta_in, queue_out, queue_meta_out, demo) -> None:
+                queue_meta_in, queue_out, queue_meta_out, demo, alpha = 1.0, beta = 0.0) -> None:
     assert os.path.exists(hef_path)
     assert os.path.exists(matmul_path)
     
@@ -204,7 +204,7 @@ def transformer(target, hef_path, matmul_path, queue_in,
 
     matmul = np.load(matmul_path)
     assert matmul.shape == (1, 12, 250, 256)
-
+    matmul = (alpha * matmul + beta).astype(np.float32, copy=False)
     prev_block = None
     while not demo.get_terminate():
         # 메타 / 인풋 받기
