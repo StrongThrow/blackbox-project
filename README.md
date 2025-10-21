@@ -36,6 +36,7 @@ AI 기반 위험도 판단 및 사고 전후 맥락 분석이 가능한 블랙�
 이 프로젝트는 이러한 요구사항을 모두 충족합니다.
 
 ### 시스템 구성
+
 |구성 요소	               |설명                                  |
 |--------------------------|--------------------------------------|
 |Raspberry Pi 5            |메인 컨트롤러, 영상 수집 및 전처리      |
@@ -45,12 +46,16 @@ AI 기반 위험도 판단 및 사고 전후 맥락 분석이 가능한 블랙�
 |Yocto / AGL              | 임베디드 환경 기반 OS 및 런타임 구성    |
 
 ### 핵심 기술
+
 ------
+
 #### Carla
 
 <img width="650" height="324" alt="image" src="https://github.com/user-attachments/assets/7e1f7057-d635-463a-a31b-3aec24aa26e0" />
 
+
 Carla의 핵심 기능
+
 
 <img width="664" height="320" alt="image" src="https://github.com/user-attachments/assets/4fad1c3b-9a46-4b29-8af3-ada2b16fcf3b" />
 
@@ -64,13 +69,16 @@ CAN(Controller Area Network) 통신은 자동차, 산업 자동화 등에서 널
 
 표준 PID 참고 URL : https://en.wikipedia.org/wiki/OBD-II_PIDs
 
+
 <img width="638" height="292" alt="image" src="https://github.com/user-attachments/assets/828597a5-f9c9-466c-9343-7cc957cd0a73" />
+
 
 본 프로젝트에서의 커스텀 PID를 이용한 CAN 통신
 
 <img width="635" height="306" alt="image" src="https://github.com/user-attachments/assets/43ceba2c-8660-4f31-84bb-6dd10e085e3a" />
 
 ----------
+
 #### PETR
 
 <img width="659" height="317" alt="image" src="https://github.com/user-attachments/assets/ebfe4f45-999d-407c-85ef-c158c8d48516" />
@@ -85,6 +93,7 @@ CAN(Controller Area Network) 통신은 자동차, 산업 자동화 등에서 널
 - 최종결과(3D box + class) 예측
 
 --------
+
 #### Yocto 
 
 Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 제공하는 프로젝트로, 개발자들이 하드웨어에 최적화된 Linux 배포판을 쉽게 만들 수 있도록 설계되었습니다.
@@ -116,7 +125,7 @@ Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 
 --------
 
 ### 개발 환경
----
+
 <img width="701" height="384" alt="개발환경" src="https://github.com/user-attachments/assets/56a3740a-4642-4342-ad33-37e1c4de2295" />
 
 
@@ -137,24 +146,29 @@ Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 
 <img width="966" height="442" alt="image" src="https://github.com/user-attachments/assets/7eb169d8-ccda-4f86-b2aa-06e52373fbe0" />
 
 ------
+
 ### 설치
 
----
 #### Ubuntu-RPi 크로스 컴파일 환경 구성
+
 1. submodule 다운로드
+
 ```bash
 $ git submodule update --init --recursive
 ```
+
 2. 크로스 컴파일용 라이브러리 설치
 
   - ARM64 아키텍처 추가
   ```bash
   $ sudo dpkg --add-architecture arm64
-  ``` 
+  ```
+
   - /etc/apt/sources.list 파일 수정
   ```bash
   $ sudo vi /etc/apt/sources.list
   ```
+
   - ARM용 저장소 주소 추가
   ```bash
   # ARM64 아키텍처를 위한 Ubuntu Ports 저장소
@@ -168,6 +182,7 @@ $ git submodule update --init --recursive
   ```bash
   $ sudo apt update
   ```
+
   - ARM용 GStreamer 개발 라이브러리 설치
   ```bash
   $ sudo apt install -y libgstreamer1.0-dev:arm64 libgstreamer-plugins-base1.0-dev:arm64
@@ -175,9 +190,11 @@ $ git submodule update --init --recursive
 ---
 
 #### 컴파일 방법
+
 ```bash
 $ cd blackbox
 ```
+
 - x86 빌드
 ```bash
 $ make
@@ -205,8 +222,9 @@ $ cd ~
 --------
 
 - python3.8
-- hailo SDK
 - requirements.txt
+- hailo SDK
+
 ---
 - python3.8 의존성 설치
 ```bash
@@ -247,20 +265,24 @@ $ pip install -r requirements.txt
 ```
 
 - hailo SDK 설치
+
 ```bash
 $ sudo dpkg -i hailort_<version>_<architecture>.deb
 $ sudo dpkg -i hailort-pcie-driver_<version>_all.deb
 ```
+
 ```bash
 $ tar xzf hailo-rt-sdk-4.20.0-rpi.tar.gz
 $ cd hailo-rt-sdk-4.20.0-rpi  # 또는 실제 디렉토리
 $ ./install.sh
 ```
+
 ```bash
 $ python3.8 -m venv hailo_env
 $ source hailo_env/bin/activate
 $ pip install hailort-4.20.0-cp38-cp38-linux_aarch64.whl
 ```
+
 - SDK 설치 후 확인
 ```bash
 $ dpkg -l | grep hailo
@@ -272,23 +294,29 @@ $ hailortcli fw-control identify
 $ sudo apt --fix-broken install
 ```
 
+---
 ### 사용법
------
+
 ```bash
 $ python vision_server.py
 ```
 
+---
 ### 출력 구조
--------
+
 ```bash
 트리구조 삽입 바람
 ```
 
+---
 ### 결과 및 시연
-----
+
 ```bash
 추가 바람
 ```
+
+---
+
 
 
 
