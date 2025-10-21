@@ -109,10 +109,6 @@ Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 
 | | QA Tests | 품질 보증 테스트 (오류 및 호환성 검사). |
 | **오른쪽: 출력** | Package Feeds (패키지 피드) | - Image Generation: 시스템 이미지 생성.<br>- SDK Generation: SDK 생성. |
 | | 최종 출력 | - Application Images: 애플리케이션 이미지.<br>- Application Development SDK: 개발 SDK. |
-| **흐름의 의미와 특징** | 화살표와 연결 | 순차적 흐름: 각 단계가 이전 출력물을 입력으로 사용. |
-| | 선택적 요소 | SCMs가 [optional]로 표시 (Git 등 선택적 사용). |
-| | 목적 | Yocto의 자동화된 빌드 파이프라인 강조, 임베디드 시스템 커스터마이징 설명. |
-| | 실제 적용 | Yocto 문서에서 사용되는 다이어그램으로, 빌드 프로세스 이해에 도움.
 
 
 -동작 원리
@@ -316,6 +312,7 @@ $ python vision_server.py
 ```
 
 ---
+
 
 
 
