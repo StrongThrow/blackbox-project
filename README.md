@@ -302,7 +302,12 @@ $ python vision_server.py
 ### 출력 구조
 
 ```bash
-트리구조 삽입 바람
+.
+├── README.md
+|
+└── blackbox
+    └── event6
+  
 ```
 
 ---
@@ -313,6 +318,7 @@ $ python vision_server.py
 ```
 
 ---
+
 
 
 
