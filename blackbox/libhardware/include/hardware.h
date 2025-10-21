@@ -31,7 +31,7 @@ extern "C" {
 #define THROTTLE_DATA_FLAG          0x01
 
 // --- 위험 상태 관련 변수 ---
-#define MAX_DISTANCE                5.0
+#define MAX_DISTANCE                2.0
 
 // --- 가속도 측정 관련 변수 ---
 #define SPEED_BUF                   32 // 최근 32개 사이클 저장
@@ -56,7 +56,9 @@ extern "C" {
 #define DETECT_HUMAN                0x04 //사람 감지
 #define DETECT_TRUCK                0x10 // 트럭 감지
 #define DETECT_ODOBANGS             0x20 // 오토바이, 자전거 감지
-#define FUNK                        0x40 // 펑크 감지
+#define DETECT_FUNK                 0x40 // 펑크 감지
+
+#define TIRE_PRESSURE_THRESHOLD    30 // 타이어 공기압 임계값(psi)
 
 //라벨
 #define LABEL_CAR                   0
