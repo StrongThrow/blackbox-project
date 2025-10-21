@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -33,7 +32,7 @@ from gi.repository import Gst
 
 
 
-DEBUGMODE = True
+DEBUGMODE = False
 # =================== 설정 ===================
 # 입력(카메라)
 SRC_W, SRC_H = 800, 450
@@ -66,10 +65,10 @@ BEV_OVERSCAN = 1.2
 EVENT_ACCEL         = 1 << 0
 EVENT_BRAKE         = 1 << 1
 EVENT_PEDESTRIAN    = 1 << 2
-EVENT_TRUCK         = 1 << 3
-EVENT_MOTORCYCLE    = 1 << 4
-EVENT_PUNK          = 1 << 5 
-EVENT_TEMP1         = 1 << 6
+EVENT_TROTTLE       = 1 << 3
+EVENT_TRUCK         = 1 << 4
+EVENT_MOTORCYCLE    = 1 << 5
+EVENT_PUNK          = 1 << 6
 EVENT_NONE          = 1 << 7
 
 # ===== Dashboard Composer: 800x450 고정 레이아웃 =====
@@ -94,7 +93,7 @@ HEADING_OFFSET_DEG = 90.0   # +x(오른쪽)을 '화면 위쪽'으로 돌리기 �
 HEADING_EMA = 0.5          # 헤딩 지터 완화(0=안함, 0.2~0.5 추천)
 _last_xy = None
 _heading_rad = 0.0
-_rot_deg_vis = 90.0 
+_rot_deg_vis = 90.0
 
 def _wrap180(a_deg: float) -> float:
     # [-180, +180)로 래핑
@@ -220,6 +219,7 @@ def recoder_event(event_flags):
     if event_flags & EVENT_ACCEL:       parts.append("accel")
     if event_flags & EVENT_BRAKE:       parts.append("brake")
     if event_flags & EVENT_PEDESTRIAN:  parts.append("pedestrian")
+    if event_flags & EVENT_TROTTLE:     parts.append("throttle")
     if event_flags & EVENT_TRUCK:       parts.append("truck")
     if event_flags & EVENT_MOTORCYCLE:  parts.append("motorcycle")
     if event_flags & EVENT_PUNK:        parts.append("punk")
@@ -228,7 +228,6 @@ def recoder_event(event_flags):
 
 def log(msg: str):
     print(f"[Py LOG] {msg}", file=sys.stderr, flush=True)
-
 
 # =================== 유틸 (qparam/양자화/BEV) ===================
 import queue as _queue
@@ -244,9 +243,71 @@ def _np_to_py(obj):
     if isinstance(obj, (list, tuple)):
         return [_np_to_py(v) for v in obj]
     return obj
-def q1(x): return float(np.around(x, 1))  
-def _build_json_msg(dets_dict, meta=None):
- 
+def q1(x): return float(np.around(x, 1))
+
+def _resize_keep_ar_by_width(img, target_w):
+    """가로를 target_w로 맞추고, 세로는 비율 유지."""
+    h, w = img.shape[:2]
+    if w == 0 or h == 0:
+        return np.zeros((1, target_w, 3), np.uint8)
+    new_h = int(round(h * (target_w / float(w))))
+    return cv2.resize(img, (target_w, new_h))
+
+def _center_paste(dst, tile, x, y, w, h):
+    """dst[y:y+h, x:x+w] 영역 가운데에 tile을 레터박스 방식으로 붙임(넘치면 잘림)."""
+    th, tw = tile.shape[:2]
+    # 타겟 영역 내 중앙 정렬
+    ox = x + max(0, (w - tw) // 2)
+    oy = y + max(0, (h - th) // 2)
+    # 클리핑
+    xs = max(x, ox); xe = min(x + w, ox + tw)
+    ys = max(y, oy); ye = min(y + h, oy + th)
+    if xs < xe and ys < ye:
+        dst[ys:ye, xs:xe] = tile[(ys-oy):(ys-oy)+(ye-ys), (xs-ox):(xs-ox)+(xe-xs)]
+
+# 🌟🌟🌟 수정된 Dashboard 생성 함수 🌟🌟🌟
+def compose_dashboard_800x450_mosaic_left_bev_right(mosaic, bev_480x480):
+    """
+    최종 출력: 800x450 BGR
+      - 왼쪽(400x450): Mosaic 이미지를 400 가로폭에 맞춰 비율 유지 리사이즈 후, 패널 중앙에 배치.
+      - 오른쪽(400x450): BEV 480x480을 400x400으로 리사이즈 후, 패널 중앙에 배치.
+    """
+    # ===== 레이아웃 설정 =====
+    LCD_W, LCD_H = 800, 450
+    LEFT_W = 400
+    RIGHT_W = LCD_W - LEFT_W # 400
+
+    # 1. 최종 캔버스 생성
+    canvas = np.zeros((LCD_H, LCD_W, 3), np.uint8)
+
+    # 2. 오른쪽 BEV 패널 처리
+    # 480x480 BEV를 400x400으로 리사이즈
+    if bev_480x480 is None:
+        bev_400 = np.zeros((400, 400, 3), np.uint8)
+    else:
+        bev_400 = cv2.resize(bev_480x480, (400, 400), interpolation=cv2.INTER_AREA)
+
+    # 🌟 해결 1: 400x450 오른쪽 패널의 중앙에 400x400 BEV를 붙여넣기 (크롭 대신)
+    _center_paste(canvas, bev_400, x=LEFT_W, y=0, w=RIGHT_W, h=LCD_H)
+
+    # 3. 왼쪽 Mosaic 패널 처리
+    if mosaic is None:
+        mosaic = np.zeros((10, 10, 3), np.uint8)
+
+    # 🌟 해결 2: Mosaic 이미지의 가로폭을 LEFT_W(400)로 맞춤 (비율 유지)
+    mosaic_resized = _resize_keep_ar_by_width(mosaic, LEFT_W)
+
+    # 400x450 왼쪽 패널의 중앙에 리사이즈된 Mosaic 붙여넣기
+    _center_paste(canvas, mosaic_resized, x=0, y=0, w=LEFT_W, h=LCD_H)
+
+    # 4. 테두리 그리기
+    cv2.rectangle(canvas, (0,0), (LEFT_W-1, LCD_H-1), (60,60,60), 1)
+    cv2.rectangle(canvas, (LEFT_W,0), (LCD_W-1, LCD_H-1), (60,60,60), 1)
+
+    return canvas
+
+def _build_json_msg(dets_dict, meta=None, score_thresh=0.3):
+
     objs = []
     try:
         if isinstance(dets_dict, dict) and dets_dict.get('pts_bbox'):
@@ -260,14 +321,17 @@ def _build_json_msg(dets_dict, meta=None):
 
             N = boxes.shape[0] if boxes.size else 0
             for i in range(N):
+                if scores[i] < score_thresh:
+                    continue
+
                 b = boxes[i]
                 l = labels[i]
                 obj = {
-                    "label": _np_to_py(l),      
+                    "label": _np_to_py(l),
                     "x":     q1(b[0]),  # 0번
                     "y":     q1(b[1]),  # 1번
                     "ax": q1(b[7]),  # 7번
-                    "ay":  q1(b[8]),  # 8번 
+                    "ay":  q1(b[8]),  # 8번
                 }
                 #log(f"[DEBUG] box {i}: {obj}")  # 디버그 로그
                 if i < len(scores): obj["score"] = _np_to_py(scores[i])
@@ -278,7 +342,7 @@ def _build_json_msg(dets_dict, meta=None):
         pass
 
     return objs          # ← 요청한 배열 키
-    
+
 
 
 def json_sender_proc(det_q):
@@ -303,9 +367,7 @@ def json_sender_proc(det_q):
         obj = {
             "objects": _build_json_msg(dets_dict, meta=meta),
         }
-        log(f"[JSON Sender] Sending {len(obj['objects'])} objects") 
-        log(f"[DEBUG] JSON: {type(obj)}")  
-        # ✅ stdout에는 JSON 한 줄만! (부모가 파싱하기 쉽게)
+
         print(json.dumps(obj, ensure_ascii=False))
         sys.stdout.flush()
 
@@ -316,7 +378,7 @@ def parse_command(line: str):
     line = line.strip()
     if not line:
         return None, None
-    
+
     if line.startswith("analyze"):
 
         payload = None
@@ -329,7 +391,7 @@ def parse_command(line: str):
                 except Exception:
                     payload = None
         return "analyze", payload
-    
+
 
     elif line.startswith("draw"):
 
@@ -343,7 +405,7 @@ def parse_command(line: str):
                 except Exception:
                     payload = None
         return "draw", payload
-    
+
 
 
 # === Add to vision_server.py (상단 유틸 근처) ===
@@ -394,29 +456,10 @@ def render_bev_frame(map_image, in_queue, payload, xy_range=XY_RANGE_M, size=640
     cv2.rectangle(bev, (ox - m, oy - m*2), (ox + m, oy + m*2), (0, 255, 0), 2)
     # === 박스 그리기 ===
     if last_dets:
-        bev = draw_bev_boxes_on(bev, last_dets, score_thresh=0.3, xy_range=xy_range)
+        bev, _ = draw_bev_boxes_on(bev, last_dets, score_thresh=0.3, xy_range=xy_range)
 
     return bev, payload_draw
 
-def _resize_keep_ar_by_width(img, target_w):
-    """가로를 target_w로 맞추고, 세로는 비율 유지."""
-    h, w = img.shape[:2]
-    if w == 0 or h == 0:
-        return np.zeros((1, target_w, 3), np.uint8)
-    new_h = int(round(h * (target_w / float(w))))
-    return cv2.resize(img, (target_w, new_h))
-
-def _center_paste(dst, tile, x, y, w, h):
-    """dst[y:y+h, x:x+w] 영역 가운데에 tile을 레터박스 방식으로 붙임(넘치면 잘림)."""
-    th, tw = tile.shape[:2]
-    # 타겟 영역 내 중앙 정렬
-    ox = x + max(0, (w - tw) // 2)
-    oy = y + max(0, (h - th) // 2)
-    # 클리핑
-    xs = max(x, ox); xe = min(x + w, ox + tw)
-    ys = max(y, oy); ye = min(y + h, oy + th)
-    if xs < xe and ys < ye:
-        dst[ys:ye, xs:xe] = tile[(ys-oy):(ys-oy)+(ye-ys), (xs-ox):(xs-ox)+(xe-xs)]
 
 def compose_dashboard_800x450_two_imgs_left_bev_right(img_top, img_bottom, bev_480x480):
     """
@@ -496,19 +539,21 @@ def _meters_to_pixels(xy, origin_px, scale):
 
 def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
     # dets: pre_post_process.decode() 결과(dict)
-    if not dets or not dets.get('pts_bbox'): 
-        return canvas
+    if not dets or not dets.get('pts_bbox'):
+        return canvas, (0, 3) # 기본 pos 반환
     item = dets['pts_bbox'][0]
     boxes3d = np.asarray(item.get('boxes_3d', []))  # (N, >=7) = [cx, cy, cz, w, l, h, yaw, ...]
     scores  = np.asarray(item.get('scores_3d', []))
     labels  = np.asarray(item.get('labels_3d', []))
 
     if boxes3d.size == 0:
-        return canvas
+        return canvas, (0, 3) # 기본 pos 반환
 
     H, W = canvas.shape[:2]
     ox = oy = W//2
     scale = W/(2*xy_range)
+
+    region_counts = [0] * 6
 
     for i in range(len(boxes3d)):
         s = float(scores[i]) if i < len(scores) else 1.0
@@ -521,6 +566,20 @@ def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
         # 범위 밖이면 스킵
         if abs(cx) > xy_range or abs(cy) > xy_range:
             continue
+
+        # 영역 카운팅 로직
+        angle_deg = np.degrees(np.arctan2(cy, cx))
+        region_index = -1
+        if cx >= 0: # 전방
+            if 30 <= angle_deg < 90:    region_index = 2
+            elif -30 <= angle_deg < 30: region_index = 1
+            elif -90 <= angle_deg < -30: region_index = 0
+        else: # 후방
+            if 90 <= angle_deg < 150:    region_index = 3
+            elif 150 <= angle_deg or angle_deg < -150: region_index = 4
+            elif -150 <= angle_deg < -90: region_index = 5
+        if region_index != -1:
+            region_counts[region_index] += 1
 
         # 코너 4점(m) → 픽셀
         corners_m = _rot_rect_corners(cx, cy, w, l, -yaw)
@@ -538,10 +597,14 @@ def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
         # 라벨/점수
         cv2.putText(canvas, f"{int(labels[i])}:{s:.2f}", front_px, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (20,20,20), 1, cv2.LINE_AA)
 
-    return canvas
+    # 가장 많이 검출된 영역 계산
+    front_counts = region_counts[0:3]
+    rear_counts = region_counts[3:6]
+    max_front_region_index = np.argmax(front_counts)
+    max_rear_region_index = np.argmax(rear_counts) + 3
+    pos = (max_front_region_index, max_rear_region_index)
 
-# === Add to vision_server.py ===
-
+    return canvas, pos
 
 # === 3x2 모자이크 유틸 ===
 def draw_cam_index(img, idx):
@@ -709,12 +772,6 @@ def fanout_proc(src_q, dst_qs):
             item = src_q.get(timeout=0.5)
         except _q.Empty:
             continue
-        # if item == STOP:
-        #     # 자식들에도 STOP 전달
-        #     for q in dst_qs:
-        #         try: q.put_nowait(STOP)
-        #         except: pass
-        #     break
         # 각 목적지 큐로 non-blocking 전송 (풀이면 드롭)
         for q in dst_qs:
             try: q.put_nowait(item)
@@ -729,24 +786,25 @@ def main():
     for r in receivers:
         r.init_pipeline()
         r.start()
-    
-    # Map 데이터 로드
-    
-    map_image = cv2.imread(MAP_PATH)
-    map_child = None
 
-    # Recorder 초기화 시작
+    # Map 데이터 로드
+    map_image = cv2.imread(MAP_PATH)
+    if map_image is None:
+        log(f"Error: Map image not found at {MAP_PATH}")
+        map_image = np.zeros((MAP_SIZE, MAP_SIZE, 3), np.uint8) # Fallback to black image
+
+
+    # Recorder 초기화
     rec = recorder.TimeWindowEventRecorder6(
          out_dir=str(RECORDER_PATH),
          size=(800, 450),
          pre_secs=5.0, post_secs=5.0,
          retention_secs=15.0,
-         save_as="mp4",  # jpg가 디버깅/속도에 유리. mp4 원하면 "mp4"
+         save_as="mp4",
          target_fps=5.0,
          exact_count=False
     )
-    # Recorder 초기화 끝
-    
+
 
     fps_calculator = fps_calc.FPSCalc(2)
     queues = []
@@ -755,60 +813,41 @@ def main():
     bb_tranformer_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
     transformer_pp_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
     pp_3dnms_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
-    nms_send_queue = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
 
 
-    queues.append(bb_tranformer_meta_queue)
-    queues.append(transformer_pp_meta_queue)
-    queues.append(bb_tranformer_queue)
-    queues.append(transformer_pp_queue)
-    queues.append(pp_3dnms_queue)
-    queues.append(nms_send_queue)
     # Hailo VDevice
-    
     manager = multiprocessing.Manager()
     demo_mng = demo_manager.DemoManager(manager)
     device_ids = Device.scan()
     if not device_ids:
         raise RuntimeError("Hailo 디바이스가 없습니다. (모듈/권한 확인: lsmod | grep -i hailo, /dev/hailo0 권한)")
     log(f"[HAILO] found devices: {device_ids}")
-    
-    
-    #params = async_api.create_vdevice_params()
+
+
     params = VDevice.create_params()
     if hasattr(params, "device_ids"):
-        params.device_ids = device_ids  
+        params.device_ids = device_ids
     threads = []
     processes = []
     with VDevice(params) as target:
         log("[HAILO] VDevice ready")
     params = VDevice.create_params()
-    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN 
+    params.scheduling_algorithm = HailoSchedulingAlgorithm.ROUND_ROBIN
 
     with VDevice(params) as target:
-        
-        # --- Backbone (in UINT8 / out UINT8)
-       
-        camera_in_q = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)  # 카메라 프레임을 백본으로 넘기는 큐
+
+        camera_in_q = multiprocessing.Queue(maxsize=MAX_QUEUE_SIZE)
 
         threads.append(threading.Thread(target=core.backbone_from_cam, args=(target, camera_in_q, BACKBONE_HEF, bb_tranformer_queue,
                                     bb_tranformer_meta_queue, demo_mng, True)))
-        
-        # alpah       beta
-        # 0.85~1.15   -2.0 ~ 2.0
-        threads.append(threading.Thread(target=core.transformer, args=(target, TRANSFORMER_HEF, MATMUL_NPY, bb_tranformer_queue, bb_tranformer_meta_queue, transformer_pp_queue, transformer_pp_meta_queue, 
+
+        threads.append(threading.Thread(target=core.transformer, args=(target, TRANSFORMER_HEF, MATMUL_NPY, bb_tranformer_queue, bb_tranformer_meta_queue, transformer_pp_queue, transformer_pp_meta_queue,
                                                                        demo_mng,1.2,-2.2)))
 
         processes.append(multiprocessing.Process(target=pre_post_process.post_proc,
                                                     args=(transformer_pp_queue, transformer_pp_meta_queue,
                                                     pp_3dnms_queue, POSTPROC_ONNX, demo_mng)))
 
-        # processes.append(multiprocessing.Process(target=pre_post_process.d3nms_proc,
-        #                                         args=(pp_3dnms_queue, nms_send_queue, nusc, demo_mng)))
-        # processes.append(multiprocessing.Process(target=visualization.viz_proc,
-        #                                 args=(args.input, args.data, nms_send_queue,
-        #                                 fps_calculator, nusc)))
-        # 스타트는 한 번만
         log("multi process starting...")
         for t in threads: t.start()
         for p in processes: p.start()
@@ -823,32 +862,21 @@ def main():
         json_out.daemon = False
         json_out.start()
 
-        # bev_proc = multiprocessing.Process(target=bev_viz_proc, args=(det_for_bev_q,), daemon=False)
-        # bev_proc.start()
         token  = 0
         recodCMD = 0
 
-        # BEV 그려주는걸 따로 빼야하니깐 처음 만들어줌
-        # win = 'BEV'
-        log("[BEV] proc start")  # 디버그 로그
-        # cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow(win, 700, 700)
         log("init done")
         WIN = "Dashboard"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
-        if DEBUGMODE == False: #디버그 안할땐 풀스크린 하면 안됨
-            cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)  # 타이틀바 제거 + 풀스크린
-        cv2.moveWindow(WIN, 0, 0)  # (선택) 좌상단 고정
-        
+        if not DEBUGMODE: #디버그 안할땐 풀스크린 하면 안됨
+            cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        cv2.moveWindow(WIN, 0, 0)
 
-        # ==========imsi map ==========
-        # cv2.namedWindow("Map8192", cv2.WINDOW_NORMAL)
-        # cv2.resizeWindow("Map8192", 768, 768)
         try :
             while True:
-
-                line = sys.stdin.readline()# 0.2 초를 보장해줌
                 
+                log("wating analyze cmd...")
+                line = sys.stdin.readline()
                 if not line:
                     log("stdin closed. exiting.")
                     break
@@ -857,11 +885,11 @@ def main():
                 if cmd != "analyze":
                     log(f"ignored line in analyze: {line.strip()}")
                     continue
+
+                images_record = []
                 
-                images_record = []      
                 if cmd == "analyze":
-                    recodCMD = recodCMD + 1
-                    # 1) 6캠 프레임 수집 + 예제 동일 전처리(800x450 → y=130~450 크롭 → 800x320)
+                    # 1) 6캠 프레임 수집
                     images_after_pre = []
                     for i in range(NUM_CAMS):
                         f = receivers[i].latest_frame
@@ -869,153 +897,111 @@ def main():
                             f = np.zeros((SRC_H, SRC_W, 3), np.uint8)
                         img = cv2.resize(f, (800, 450))
                         images_record.append(img.copy())
-                        x, y, width, height = 0, 130, 800, 450  
+                        x, y, width, height = 0, 130, 800, 450
                         img = img[y:height, x:x + width]
-
                         images_after_pre.append(img)
 
-                    #rec.push_batch(images_record)
+                    frames_np = np.asarray(images_after_pre, dtype=np.uint8)
+                    token += 1
 
-                    frames_np = np.asarray(images_after_pre, dtype=np.uint8)  
-                    #token = time.time_ns()
-                    token = token + 1
-                    
                     try:
                         camera_in_q.put((frames_np, {"token": token}), block=False)
-                        now = time.time()
-                        localtime = time.localtime(now)
-                        hi = time.strftime("%Y-%m-%d %H:%M:%S",localtime)
-                        log(f"{hi}[Main] size : {camera_in_q.qsize()}")
-                    except:
-                        _ = camera_in_q.get()  # 가장 오래된 프레임 드롭
+                    except _queue.Full:
+                        _ = camera_in_q.get()
+                        camera_in_q.put((frames_np, {"token": token}), block=False)
                         log("[Main] WARN: camera_in_q full, dropping frame")
-                        pass
-                        
-                    #print(json.dumps({"status": "success", "detections": detections}, ensure_ascii=False))
-                    # sys.stdout.flush()
-                    log("wating draw cmd...")
-                    line = sys.stdin.readline()# draw   
-                    cmd, payload = parse_command(line)
 
-                    # cmd :draw
-                    # event : value
-                    # speed : speed
-                    # tires : [fl, fr, rl, rr]
+                    log("wating draw cmd...")
+                    line = sys.stdin.readline()
+                    cmd, payload = parse_command(line)
 
                     if cmd != "draw":
                         log(f"ignored line in draw: {line.strip()}")
                         print("done", flush=True)
                         continue
-                    log(f"received cmd: {cmd}")
+
                     if cmd == "draw":
-                        # log(f"[BEV] draw cmd received")  # 디버그 로그
-                        # log(f"[BEV] payload: {payload}")  # 디버그 로그
+                        cam_order = [2, 0, 1, 5, 3, 4]
 
-                        #bev_viz_proc(map_image ,det_for_bev_q, (payload, anlalyze_paylaod), win)# 그려주는건 따로 
-
-
-                        if DEBUGMODE:
-                            cam_order = [0, 1, 2, 3, 4, 5]
-
-                            # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
-                            # tile_wh=(400,160) → 전체 약 (3*400 + 여백) x (2*160 + 여백) ≈ 1220x344
-                            mosaic = make_mosaic_grid(
-                                images_after_pre,
-                                rows=2, cols=3,
-                                tile_wh=(400, 160),
-                                pad=6,
-                                order=cam_order,
-                                draw_index=True
-                            )
-
-                            cv2.imshow("Cams 3x2", mosaic)
-                            cv2.waitKey(1)
-                        
-                        bev_480, payload_draw = render_bev_frame(
-                            map_image, det_for_bev_q, (payload, anlalyze_paylaod),
-                            xy_range=XY_RANGE_M, size=480  # ← BEV 내부 캔버스 480x480
+                        # 🌟🌟🌟 수정된 Mosaic 생성 파라미터 🌟🌟🌟
+                        mosaic = make_mosaic_grid(
+                            images_record, # 크롭 전 원본(800x450) 사용
+                            rows=3, cols=2,
+                            tile_wh=(190, 107), # 400px 패널에 맞춘 크기
+                            pad=6,
+                            order=cam_order,
+                            draw_index=True
                         )
 
-                        # "draw {"
-                        #    value
-                        #    rpm
-                        #    brake_state
-                        #    gear_ratio
-                        #    gear_state    
-                        #    throttle
-                        H, W = bev_480.shape[:2]          # bev_480은 480x480
+                        #if DEBUGMODE:
+                            # 🌟 수정된 창 이름
+                            #cv2.imshow("Cams 3x2", mosaic)
+                            #cv2.waitKey(1)
+
+                        bev_480, payload_draw = render_bev_frame(
+                            map_image, det_for_bev_q, (payload, anlalyze_paylaod),
+                            xy_range=XY_RANGE_M, size=480
+                        )
+                        
+                        _, pos = draw_bev_boxes_on(bev_480, det_for_bev_q.get() if not det_for_bev_q.empty() else None)
+                        
+                        img_top    = images_record[pos[0]] if len(images_record) > pos[0] else None
+                        img_bottom = images_record[pos[1]] if len(images_record) > pos[1] else None
+
+                        # Dashboard for display
+                        dashboard_display = compose_dashboard_800x450_two_imgs_left_bev_right(img_top, img_bottom, bev_480)
+
+                        H, W = bev_480.shape[:2]
                         txt1 = f"tires {payload['tires'][0]:.1f}, {payload['tires'][1]:.1f}, {payload['tires'][2]:.1f}, {payload['tires'][3]:.1f}"
                         txt2 = f"speed : {payload['speed']:.1f} km/h brake :{payload_draw['brake_state']}%  throttle : {payload_draw['throttle']} % rpm : {payload_draw['rpm']}"
-                        log(f"{payload_draw}")  # 디버그 로그
-                        gps = anlalyze_paylaod['gps']
-                        x, y = gps
+                        log(txt1)
+                        log(txt2)
+                        # Display Dashboard에 텍스트 그리기
+                        cv2.putText(dashboard_display, txt1, (410, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt1, (410, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt2, (410, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt2, (410, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                        
+                        cv2.imshow(WIN, dashboard_display)
 
-                        org = (10, H - 30)                # (x, y) = 좌하단에서 10px/30px 여백
-
-                        # 외곽선(검정) + 본문(흰색) 두 번 그리기 → 가독성↑
-                        cv2.putText(bev_480, txt1, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
-                        cv2.putText(bev_480, txt1, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
-
-                        org = (10, H - 50)  
-                        cv2.putText(bev_480, txt2, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
-                        cv2.putText(bev_480, txt2, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
-
-                        #images_record.append(bev_480.copy())  # 녹화용에 BEV도 추가
-                        #rec.push_batch(images_record)
-                        # 4) 왼쪽에 쓸 두 장 선택(예: 0=Front, 3=Rear)
-                        img_top    = images_record[0] if len(images_record) > 0 else None
-                        img_bottom = images_record[3] if len(images_record) > 3 else None
-
-                        dashboard = compose_dashboard_800x450_two_imgs_left_bev_right(img_top, img_bottom, bev_480)
-                        cv2.imshow(WIN, dashboard)
-                        rec.push_single(dashboard)
-
+                        # Dashboard for recording
+                        record_dashboard = compose_dashboard_800x450_mosaic_left_bev_right(mosaic, bev_480)
+                        # 🌟 cam_id 추가
+                        rec.push_single(record_dashboard, cam_id=0)
 
                         key = cv2.waitKey(1) & 0xFF
-                        if key in (27, ord('q')):   # ESC 또는 q 로 종료
+                        if key in (27, ord('q')):
                             break
-                        elif key == ord('f'):       # f 로 풀스크린 토글
+                        elif key == ord('f'):
                             fs = cv2.getWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN)
-                            cv2.setWindowProperty(
-                                WIN, cv2.WND_PROP_FULLSCREEN,
-                                cv2.WINDOW_NORMAL if fs == 1.0 else cv2.WINDOW_FULLSCREEN
-                            )
+                            cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL if fs == 1.0 else cv2.WINDOW_FULLSCREEN)
+
                         event = payload['value']
                         SPECIAL_LINE_PATH = "./special_event_log.txt"
-
                         ts = time.strftime("%Y-%m-%d %H:%M:%S")
 
-                        if(recodCMD == 100):
-                            event = 0x3F
-                            with open(SPECIAL_LINE_PATH, "a", encoding="utf-8") as f:
-                                f.write(f"[{ts}] init imsi event {event}\n")
-                        # imsi recorder 7번비트가 0이 아니라면
                         if ((event & EVENT_NONE) == 0x00) and ((event & 0x3F) != 0x00):
                             log(f"event : {event}")
                             trigger_str = recoder_event(event)
                             rec.trigger(str(trigger_str))
                             with open(SPECIAL_LINE_PATH, "a", encoding="utf-8") as f:
-                                f.write(f"[{ts}] {trigger_str}\n")
+                                f.write(f"[{ts}] {trigger_str} : event value : {event}\n")
                         log("end draw ...")
 
-            
-                print("done", flush=True)        
+
+                print("done", flush=True)
             print("exit", flush=True)
         except KeyboardInterrupt:
             demo_mng.set_terminate()
 
         finally:
-            # STOP 브로드캐스트
             for q in (pp_3dnms_queue, det_for_json_q, det_for_bev_q):
                 try: q.put_nowait(STOP)
                 except: pass
 
-            # 스레드/프로세스 조인
             for t in threads: t.join(timeout=1)
             for p in processes: p.join(timeout=2)
-            #fan.join(timeout=1); json_out.join(timeout=1); bev_proc.join(timeout=1)
 
-            # 수신기 정지
             for r in receivers: r.stop()
 
             cv2.destroyAllWindows()
