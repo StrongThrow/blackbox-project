@@ -745,6 +745,13 @@ int main() {
 
                 }
             }
+
+            //타이어 펑크 검출
+            for(int i = 0; i < 4; i++){
+                if(vehicle_data.tire_pressure[i] < TIRE_PRESSURE_THRESHOLD){
+                    car_state_flag |= DETECT_FUNK;
+                }
+            }
             
             if (send_save_request(stream_to_python, &vehicle_data, car_state_flag) == 0) {
                 // 최대 3000ms(3초) 동안 "done" 대기. 0을 주면 무제한 대기.
