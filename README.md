@@ -6,15 +6,15 @@
 
 # 목차
 
-- [개발동기](#개발동기)
-- [개발환경](#개발환경)
+- [개발 동기](#개발-동기)
+- [개발 환경](#개발-환경)
 - [설치](#설치)
   - [방법 1: git clone](#방법-1-git-clone)
 - [의존성](#의존성)
 - [사용법](#사용법)
 - [출력 구조](#출력-구조)
 
-### 개발동기
+### 개발 동기
 
 기존 블랙박스에서는 알 수 없는 위험을 AI로 판단하기 위해 이 프로젝트를 만들었습니다. 이 도구는 다음과 같은 기능을 제공합니다:
 
@@ -24,7 +24,7 @@
 
 이 프로젝트는 이러한 요구사항을 모두 충족합니다.
 
-### 개발환경
+### 개발 환경
 ---
 |개발 환경                                     |                                    |
 | -------------------------------------------|----------------------------------- |
@@ -80,6 +80,12 @@ $ pyenv global 3.8.0
 
 - requirements 설치
 ```bash
+$ sudo apt update && sudo apt full-upgrade -y
+$ sudo raspi-config  # Interface Options > PCIe > Enable
+$ sudo reboot
+```
+
+```bash
 #가상환경 접속 후
 $ pip install -r requirements.txt
 ```
@@ -88,9 +94,17 @@ $ pip install -r requirements.txt
 ```bash
 $ sudo dpkg -i hailort_<version>_<architecture>.deb
 $ sudo dpkg -i hailort-pcie-driver_<version>_all.deb
-$ tar -xvf hailort
 ```
-
+```bash
+$ tar xzf hailo-rt-sdk-4.20.0-rpi.tar.gz
+$ cd hailo-rt-sdk-4.20.0-rpi  # 또는 실제 디렉토리
+$ ./install.sh
+```
+```bash
+$ python3.8 -m venv hailo_env
+$ source hailo_env/bin/activate
+$ pip install hailort-4.20.0-cp38-cp38-linux_aarch64.whl
+```
 - SDK 설치 후 확인
 ```bash
 $ dpkg -l | grep hailo
@@ -113,6 +127,9 @@ $ python vision_server.py
 ```bash
 트리구조 삽입 바람
 ```
+
+### 
+
 
 
 
