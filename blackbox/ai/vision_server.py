@@ -33,6 +33,8 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
 
+
+DEBUGMODE = True
 # =================== 설정 ===================
 # 입력(카메라)
 SRC_W, SRC_H = 800, 450
@@ -835,7 +837,8 @@ def main():
         log("init done")
         WIN = "Dashboard"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
-        cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)  # 타이틀바 제거 + 풀스크린
+        if DEBUGMODE == False: #디버그 안할땐 풀스크린 하면 안됨
+            cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)  # 타이틀바 제거 + 풀스크린
         cv2.moveWindow(WIN, 0, 0)  # (선택) 좌상단 고정
         
 
@@ -855,12 +858,12 @@ def main():
                 if cmd != "analyze":
                     log(f"ignored line in analyze: {line.strip()}")
                     continue
-
+                
+                images_record = []      
                 if cmd == "analyze":
                     recodCMD = recodCMD + 1
                     # 1) 6캠 프레임 수집 + 예제 동일 전처리(800x450 → y=130~450 크롭 → 800x320)
                     images_after_pre = []
-                    images_record = []
                     for i in range(NUM_CAMS):
                         f = receivers[i].latest_frame
                         if f is None:
@@ -872,7 +875,7 @@ def main():
 
                         images_after_pre.append(img)
 
-                    rec.push_batch(images_record)
+                    #rec.push_batch(images_record)
 
                     frames_np = np.asarray(images_after_pre, dtype=np.uint8)  
                     #token = time.time_ns()
@@ -912,47 +915,63 @@ def main():
                         #bev_viz_proc(map_image ,det_for_bev_q, (payload, anlalyze_paylaod), win)# 그려주는건 따로 
 
 
-                        # cam_order = [0, 1, 2, 3, 4, 5]
+                        if DEBUGMODE:
+                            cam_order = [0, 1, 2, 3, 4, 5]
 
-                        # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
-                        # tile_wh=(400,160) → 전체 약 (3*400 + 여백) x (2*160 + 여백) ≈ 1220x344
-                        # mosaic = make_mosaic_grid(
-                        #     images_after_pre,
-                        #     rows=2, cols=3,
-                        #     tile_wh=(400, 160),
-                        #     pad=6,
-                        #     order=cam_order,
-                        #     draw_index=True
-                        # )
-                    
-                        # cv2.imshow("Cams 3x2", mosaic)
-                        # cv2.waitKey(1)
+                            # 원본(800x320)을 바로 키우면 화면이 너무 커지니 적당히 축소
+                            # tile_wh=(400,160) → 전체 약 (3*400 + 여백) x (2*160 + 여백) ≈ 1220x344
+                            mosaic = make_mosaic_grid(
+                                images_after_pre,
+                                rows=2, cols=3,
+                                tile_wh=(400, 160),
+                                pad=6,
+                                order=cam_order,
+                                draw_index=True
+                            )
+
+                            cv2.imshow("Cams 3x2", mosaic)
+                            cv2.waitKey(1)
                         
                         bev_480, payload_draw = render_bev_frame(
                             map_image, det_for_bev_q, (payload, anlalyze_paylaod),
                             xy_range=XY_RANGE_M, size=480  # ← BEV 내부 캔버스 480x480
                         )
+
+                        # "draw {"
+                        #    value
+                        #    rpm
+                        #    brake_state
+                        #    gear_ratio
+                        #    gear_state    
+                        #    throttle
                         H, W = bev_480.shape[:2]          # bev_480은 480x480
-                        #txt = f"speed : {payload['speed']:.1f} km/h | tires {payload['tires'][0]:.1f}, {payload['tires'][1]:.1f}, {payload['tires'][2]:.1f}, {payload['tires'][3]:.1f}"
+                        txt1 = f"tires {payload['tires'][0]:.1f}, {payload['tires'][1]:.1f}, {payload['tires'][2]:.1f}, {payload['tires'][3]:.1f}"
+                        txt2 = f"speed : {payload['speed']:.1f} km/h brake :{payload_draw['brake_state']}%  throttle : {payload_draw['throttle']} % rpm : {payload_draw['rpm']}"
+                        log(f"{payload_draw}")  # 디버그 로그
                         gps = anlalyze_paylaod['gps']
-                        steer = anlalyze_paylaod['steer']
                         x, y = gps
-                        txt = f"speed : {x}, {y}, {steer}"
-                        # fullmap_view = render_fullmap_8192(map_image, x, y, 0, xy_range_m=XY_RANGE_M,
-                        #     out_size=(768,768))
-                        # cv2.imshow("Map8192", fullmap_view)
-                        # cv2.waitKey
+
                         org = (10, H - 30)                # (x, y) = 좌하단에서 10px/30px 여백
 
                         # 외곽선(검정) + 본문(흰색) 두 번 그리기 → 가독성↑
-                        cv2.putText(bev_480, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
-                        cv2.putText(bev_480, txt, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(bev_480, txt1, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
+                        cv2.putText(bev_480, txt1, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+
+                        org = (10, H - 50)  
+                        cv2.putText(bev_480, txt2, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
+                        cv2.putText(bev_480, txt2, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+
+                        #images_record.append(bev_480.copy())  # 녹화용에 BEV도 추가
+                        #rec.push_batch(images_record)
                         # 4) 왼쪽에 쓸 두 장 선택(예: 0=Front, 3=Rear)
                         img_top    = images_record[0] if len(images_record) > 0 else None
                         img_bottom = images_record[3] if len(images_record) > 3 else None
 
                         dashboard = compose_dashboard_800x450_two_imgs_left_bev_right(img_top, img_bottom, bev_480)
                         cv2.imshow(WIN, dashboard)
+                        rec.push_single(dashboard)
+
+
                         key = cv2.waitKey(1) & 0xFF
                         if key in (27, ord('q')):   # ESC 또는 q 로 종료
                             break
