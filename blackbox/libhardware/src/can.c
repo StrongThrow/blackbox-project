@@ -158,7 +158,7 @@ int can_request_pid(unsigned char pid) {
  * @return 어떤 데이터가 업데이트되었는지 나타내는 상태 플래그. (예: STATE_SPEED_RECEIVED)
  * 유효한 응답이 아니면 0을 반환합니다.
  */
-void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data, unsigned char* flag) {
+void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data, unsigned char* flag, unsigned char* flag2) {
     // 1. 이 메시지가 ECU의 진단 응답이 맞는지 ID부터 확인합니다. (응답 ID 범위: 0x7E8 ~ 0x7EF)
     if (msg->id < 0x7E8 || msg->id > 0x7EF) {
         return; // 우리가 기다리던 진단 응답이 아니므로 무시.
@@ -243,18 +243,23 @@ void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data,
             vehicle_data->tire_pressure[2] = msg->data[5]; vehicle_data->tire_pressure[3] = msg->data[6];
             *flag |= TIRE_DATA_FLAG;
             break;
-        // 여기에 다른 PID(GPS 위도, 경도, 조향각 등)에 대한 case를 계속 추가하면 됩니다.
+        
+        case PID_THROTTLE_DATA:
+            vehicle_data->throttle = msg->data[3];
+            *flag2 |= THROTTLE_DATA_FLAG;
+            break;
+        // 여기에 다른 PID(GPS 위도, 경도, 조향각 등)에 대한 case를 계속 추가.
         // case PID_GPS_LATITUDE:
         //     ... 파싱 로직 ...
         //     new_state_flag = STATE_GPS_LAT_RECEIVED;
         //     break;
 
         default:
-            // 우리가 요청하지 않았거나, 아직 처리 로직을 만들지 않은 PID는 그냥 무시합니다.
+            // 우리가 요청하지 않았거나, 아직 처리 로직을 만들지 않은 PID는 그냥 무시.
             break;
     }
 
-    // main.c에 어떤 데이터가 갱신되었는지 알려주기 위해 상태 플래그를 반환합니다.
+    // main.c에 어떤 데이터가 갱신되었는지 알려주기 위해 상태 플래그를 반환.
 
 }
 

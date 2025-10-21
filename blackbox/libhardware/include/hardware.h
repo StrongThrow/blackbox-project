@@ -16,6 +16,7 @@ extern "C" {
 #define PID_STEERING_DATA           0x20 //조향각 데이터(실제 존재 X)
 #define PID_BRAKE_DATA              0x40 //브레이크 데이터(실제 존재 X)
 #define PID_TIRE_DATA               0x80 //타이어 공기압 데이터(실제 존재 X)
+#define PID_THROTTLE_DATA           0x50 //스로틀 데이터(실제 존재 X)
 
 // --- 상태 제어 관련 변수 ---
 #define ENGINE_SPEED_FLAG           0x01
@@ -26,6 +27,8 @@ extern "C" {
 #define STEERING_DATA_FLAG          0x20
 #define BRAKE_DATA_FLAG             0x40
 #define TIRE_DATA_FLAG              0x80
+
+#define THROTTLE_DATA_FLAG          0x01
 
 // --- 위험 상태 관련 변수 ---
 #define MAX_DISTANCE                5.0
@@ -153,7 +156,7 @@ typedef struct {
 } VehicleData;
 
 int can_request_pid(unsigned char pid);
-void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data, unsigned char* flag);
+void can_parse_and_update_data(const CANMessage* msg, VehicleData* vehicle_data, unsigned char* flag, unsigned char* flag2);
 int can_init(const char* interface_name); // <<-- 수정: 인터페이스 이름을 받고, 성공 시 fd를 반환하도록 변경
 int can_send_message(const CANMessage* msg);
 int can_receive_message(CANMessage* msg); // 1=수신, 0=없음, <0=에러

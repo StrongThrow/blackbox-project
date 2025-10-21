@@ -300,9 +300,27 @@ static int send_save_request(FILE* to_py, const VehicleData* v, const unsigned c
     if (!to_py || !v) return -1;
 
     int n = fprintf(to_py,
-        "draw {\"value\":%u,\"speed\":%d,"
-        "\"tires\":[%u,%u,%u,%u]}\n",
-        (unsigned)value, v->speed,
+        "draw {"
+            "\"value\":%u,"
+            // "\"gps\":[%.6f,%.6f],"
+            "\"speed\":%d,"
+            "\"rpm\":%d,"
+            "\"brake_state\":%u,"
+            "\"gear_ratio\":%.4f,"
+            "\"gear_state\":%d,"      /* char -> int 코드로 전송 */
+            //"\"degree\":%.2f,"
+            "\"throttle\":%u,"
+            "\"tires\":[%u,%u,%u,%u]"
+        "}\n",
+        (unsigned)value,
+        // v->gps_x, v->gps_y,
+        v->speed,
+        v->rpm,
+        (unsigned)v->brake_state,
+        v->gear_ratio,
+        (int)v->gear_state,
+        //v->degree,
+        (unsigned)v->throttle,
         v->tire_pressure[0], v->tire_pressure[1],
         v->tire_pressure[2], v->tire_pressure[3]
     );
@@ -400,6 +418,7 @@ int main() {
     CANMessage can_message = {0};   // CAN통신 데이터 프레임
     unsigned char state_flag = 0;   // 상태 플래그
     unsigned char ai_state_flag = 0;// AI 분석 결과 플래그
+    unsigned char state_flag2 = 0;
 
     unsigned char car_state_flag = 0;  // 자동차 상태 확인 플래그
 
@@ -494,6 +513,12 @@ int main() {
                 }
             }
 
+            //쓰로틀 업데이트(임시)
+            if((state_flag2 & THROTTLE_DATA_FLAG) == 0x00){
+                if(can_request_pid(PID_THROTTLE_DATA) < 0){
+                    perror("[C] CAN_Data_request failed");
+                }
+            }
 
             // ===========================================================================
             
@@ -525,7 +550,7 @@ int main() {
 
         struct timeval tv;
         tv.tv_sec = 0;
-        tv.tv_usec = 50 * 1000; // 50 ms
+        tv.tv_usec = 100 * 1000; // 50 ms
 
         int ready = select(maxfd + 1, &rfds, NULL, NULL, &tv);
         if (ready < 0) {
@@ -591,7 +616,7 @@ int main() {
                     break;
                 } else {
                     // 정상 프레임 1개 수신 → 파싱 및 상태 플래그 갱신
-                    can_parse_and_update_data(&can_message, &vehicle_data, &state_flag);
+                    can_parse_and_update_data(&can_message, &vehicle_data, &state_flag, &state_flag2);
                 }
             }
         }
@@ -601,7 +626,8 @@ int main() {
             (ENGINE_SPEED, VEHICLE_SPEED, GEAR_STATE, GPS, STEERING, BRAKE, TIRE 등)
             프로토타입에서는 이 완전 세트를 만족했을 때 한 번 제어 로직을 실행하도록 구성. */
         if ( ((ai_state_flag & AI_RESULT_READY_FLAG) == AI_RESULT_READY_FLAG) &&
-                ((state_flag & COMPLETE_DATA_FLAG) == COMPLETE_DATA_FLAG) ) {
+                ((state_flag & COMPLETE_DATA_FLAG) == COMPLETE_DATA_FLAG) &&
+                ((state_flag2 & 0x01) == 0x01) ) {
 
         // ======= [ADD] 최종 제어 로직 지점 ==========================================
             if (g_ai_objs && g_ai_count > 0) {
@@ -740,6 +766,7 @@ int main() {
             //메모리 해제
             if (g_ai_objs) { free(g_ai_objs); g_ai_objs = NULL; g_ai_count = 0; }
             state_flag = 0;
+            state_flag2 = 0;
             ai_state_flag = 0;
             car_state_flag = 0;
             printf("\nfinish one cycle, next cycle will be started.\n");
@@ -771,6 +798,7 @@ int main() {
                     perror("[C] send_save_request failed");
             }
             state_flag = 0;
+            state_flag2 = 0;
             ai_state_flag = 0;
             car_state_flag = 0;
 
