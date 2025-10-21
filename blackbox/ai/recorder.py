@@ -22,7 +22,10 @@ class TimeWindowEventRecorder6:
                  post_secs=5.0,
                  retention_secs=60.0,    # 버퍼에 보관할 최대 시간 (메모리 제한용)
                  save_as="jpg",          # "jpg" | "mp4"
-                 fourcc_str="mp4v"):
+                 fourcc_str="mp4v",                 
+                 target_fps=5.0,           # ← 추가: 저장/표시 FPS 고정
+                 exact_count=True
+                 ):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.size = tuple(size)
@@ -31,6 +34,10 @@ class TimeWindowEventRecorder6:
         self.retention_secs = float(retention_secs)
         self.save_as = save_as
         self.fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+
+
+        self.target_fps = float(target_fps)
+        self.exact_count = bool(exact_count)
 
         # 시간 기반 링버퍼: [(ts, [jpg_cam0..cam5])]
         self.buffer = deque()
@@ -41,6 +48,11 @@ class TimeWindowEventRecorder6:
         self.t0 = None
         self.event_id = None
         self._post_done = False
+
+        # exact_count 모드에서 사용: 필요/수집 개수
+        self._pre_needed = 0
+        self._post_needed = 0
+        self._post_got = 0
 
         # 비동기 저장 워커 (블로킹 방지)
         import queue
@@ -75,10 +87,16 @@ class TimeWindowEventRecorder6:
             self.buffer.append((ts, jpg6))
             self._prune_old_locked(ts)
 
-            # 이벤트 진행 중이면 post 완료 체크
-            if self.active and not self._post_done:
+            if self.active and self.exact_count:
+                # t0 이후 프레임 개수 카운팅
+                if ts > self.t0:
+                    self._post_got += 1
+                # 이후 프레임이 목표 개수에 도달하면 finalize
+                if self._post_got >= self._post_needed:
+                    self._finalize_and_enqueue_locked()
+            elif self.active and not self.exact_count:
+                # (구) 시간 기반 모드가 필요하면 여기서 처리할 수 있음
                 if ts >= self.t0 + self.post_secs:
-                    self._post_done = True
                     self._finalize_and_enqueue_locked()
 
     def trigger(self, tag: str = ""):
@@ -88,12 +106,15 @@ class TimeWindowEventRecorder6:
                 return  # 단일 세션 정책: 이미 진행 중이면 무시(동시 다중 필요 시 확장)
             self.active = True
             self.t0 = time.time()
-            self._post_done = False
             self.event_id = f"{_ts_str()}{('_'+tag) if tag else ''}"
-            # pre는 finalize 시점에 buffer에서 시간 조건으로 추출
+
+            # exact_count 모드: 프레임 개수로 선/후롤 목표 설정
+            if self.exact_count:
+                self._pre_needed  = int(round(self.pre_secs  * self.target_fps))
+                self._post_needed = int(round(self.post_secs * self.target_fps))
+                self._post_got = 0   # t0 이후로 들어오는 배치 개수
 
     def close(self, wait: float = 5.0):
-        """종료 시 호출(워커 정리)"""
         self._stop = True
         t0 = time.time()
         while not self._jobs.empty() and (time.time() - t0 < wait):
@@ -102,45 +123,90 @@ class TimeWindowEventRecorder6:
 
     # ------------- 내부 유틸 -------------
     def _prune_old_locked(self, now_ts):
-        """retention_secs 보다 오래된 배치 제거(메모리 제한)"""
-        cutoff = now_ts - self.retention_secs
-        while self.buffer and self.buffer[0][0] < cutoff:
-            self.buffer.popleft()
+            cutoff = now_ts - self.retention_secs
+            while self.buffer and self.buffer[0][0] < cutoff:
+                self.buffer.popleft()
 
+    def _take_last_with_pad(self, seq, n, pad_with=None):
+        """
+        seq: list[(ts, jpg6)]
+        n개가 모자라면 pad_with(없으면 seq의 첫 원소)를 앞쪽으로 복제
+        """
+        if n <= 0:
+            return []
+        if len(seq) >= n:
+            return seq[-n:]
+        if not seq:
+            if pad_with is None:
+                return []
+            return [pad_with] * n
+        need = n - len(seq)
+        pad = [ (seq[0] if pad_with is None else pad_with) ] * need
+        return pad + seq
+
+    def _take_first_with_pad(self, seq, n, pad_with=None):
+        """
+        seq: list[(ts, jpg6)]
+        n개가 모자라면 pad_with(없으면 seq의 마지막 원소)를 뒤쪽으로 복제
+        """
+        if n <= 0:
+            return []
+        if len(seq) >= n:
+            return seq[:n]
+        if not seq:
+            if pad_with is None:
+                return []
+            return [pad_with] * n
+        need = n - len(seq)
+        pad = [ (seq[-1] if pad_with is None else pad_with) ] * need
+        return seq + pad
+    
     def _finalize_and_enqueue_locked(self):
-        """pre/post 구간을 시간조건으로 뽑아 저장작업 큐에 enqueue"""
         t0 = self.t0
-        pre_from = t0 - self.pre_secs
-        post_to = t0 + self.post_secs
 
-        # 시간 조건으로 버퍼에서 추출
-        window = [b for b in self.buffer if pre_from <= b[0] <= post_to]
-        # 안전하게 시간 정렬
-        window.sort(key=lambda x: x[0])
+        if self.exact_count:
+            # 버퍼를 리스트로 변환 후, t0 기준으로 분할
+            buf = list(self.buffer)
+            pre  = [b for b in buf if b[0] <= t0]
+            post = [b for b in buf if b[0] >  t0]
 
-        # 아예 없으면 드롭
+            # pre는 '마지막 pre_needed개', post는 '처음 post_needed개'를 확보(부족하면 패딩)
+            # 패딩 기준 프레임은 서로 맞물리게: pre쪽은 post의 첫 프레임, post쪽은 pre의 마지막 프레임을 사용
+            pad_for_pre  = post[0] if post else (pre[-1] if pre else None)
+            pad_for_post = pre[-1] if pre else (post[0] if post else None)
+
+            pre_sel  = self._take_last_with_pad(pre,  self._pre_needed,  pad_with=pad_for_pre)
+            post_sel = self._take_first_with_pad(post, self._post_needed, pad_with=pad_for_post)
+
+            window = pre_sel + post_sel
+
+        else:
+            # (구) 시간 기반 윈도우
+            pre_from = t0 - self.pre_secs
+            post_to  = t0 + self.post_secs
+            window = [b for b in self.buffer if pre_from <= b[0] <= post_to]
+            window.sort(key=lambda x: x[0])
+
+        # 아예 없으면 리셋
         if not window:
-            # 상태 리셋
-            self.active = False
-            self.t0 = None
-            self.event_id = None
-            self._post_done = False
+            self._reset_event_locked()
             return
 
-        # 저장 경로
         event_dir = str(self.out_dir / self.event_id)
-
-        # enqueue (워커가 실제 파일 저장)
         try:
             self._jobs.put_nowait((window, event_dir))
         except Exception:
             pass
 
-        # 상태 리셋
+        self._reset_event_locked()
+
+    def _reset_event_locked(self):
         self.active = False
         self.t0 = None
         self.event_id = None
-        self._post_done = False
+        self._pre_needed = 0
+        self._post_needed = 0
+        self._post_got = 0
 
     def _worker_loop(self):
         import queue
@@ -172,22 +238,34 @@ class TimeWindowEventRecorder6:
                 for idx, (ts, jb) in enumerate(cam_streams[cam]):
                     with open(cdir / f"{idx:04d}_{int(ts*1000)}.jpg", "wb") as f:
                         f.write(jb)
-        else:  # "mp4"
+        else:  # "mp4" - 항상 '10초' 길이 유지(패딩 없이), 프레임수에 맞춰 FPS 조절
+            duration_s = (self.pre_secs + self.post_secs)  # 10.0
             for cam in range(NUM_CAMS):
                 items = cam_streams[cam]
                 if not items:
                     continue
+
+                # 첫 프레임에서 사이즈 얻기
                 first = items[0][1]
-                img = cv2.imdecode(np.frombuffer(first, dtype=np.uint8), cv2.IMREAD_COLOR)
-                h, w = img.shape[:2]
-                vw = cv2.VideoWriter(str(Path(event_dir)/f"cam{cam}.mp4"),
-                                     self.fourcc,  # fps 모름 → 타임스탬프 간격으로 보간하려면 추가 로직 필요
-                                     10,           # 임시 fps(재생 편의용). 진짜 시간축은 ts로 복원 가능.
-                                     (w, h))
+                img0 = cv2.imdecode(np.frombuffer(first, dtype=np.uint8), cv2.IMREAD_COLOR)
+                h, w = img0.shape[:2]
+
+                # 프레임 개수에 맞춰 FPS 산정: N / duration_s
+                N = len(items)
+                fps_out = max(1.0, min(30.0, float(N) / max(0.001, duration_s)))  # 1~30 FPS 클램프
+
+                vw = cv2.VideoWriter(str(Path(event_dir) / f"cam{cam}.mp4"),
+                                    self.fourcc,
+                                    fps_out,
+                                    (w, h))
                 if not vw.isOpened():
                     raise RuntimeError("VideoWriter open failed")
+
+                # 패딩/중복 없이 그냥 있는 프레임만 순서대로 기록
                 for _, jb in items:
                     fr = cv2.imdecode(np.frombuffer(jb, dtype=np.uint8), cv2.IMREAD_COLOR)
                     vw.write(fr)
                 vw.release()
-        print(f"[SAVE] {event_dir}  (frames={len(window)})")
+
+            print(f"[SAVE] {event_dir} frames_total={len(window)} "
+                f"→ fixed_duration={duration_s:.2f}s (variable FPS)")
