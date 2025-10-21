@@ -139,7 +139,8 @@ Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 
 
 ### 하드웨어 구성
 
-<img width="966" height="442" alt="image" src="https://github.com/user-attachments/assets/7eb169d8-ccda-4f86-b2aa-06e52373fbe0" />
+<img width="1247" height="553" alt="image" src="https://github.com/user-attachments/assets/83881d7c-a061-4597-8b1e-620f1ecab3da" />
+
 
 ------
 
@@ -312,6 +313,7 @@ $ python vision_server.py
 ```
 
 ---
+
 
 
 
