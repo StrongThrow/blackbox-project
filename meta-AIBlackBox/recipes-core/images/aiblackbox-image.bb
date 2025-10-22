@@ -1,7 +1,6 @@
 require recipes-core/images/core-image-base.bb
 
-EXTRA_IMAGE_FEATURES += " ssh-server-openssh debug-tweaks"
-
+EXTRA_IMAGE_FEATURES += "ssh-server-openssh debug-tweaks"
 LICENSE_FLAGS_ACCEPTED += "commercial"
 
 IMAGE_INSTALL:append = " \
@@ -22,22 +21,42 @@ IMAGE_INSTALL:append = " \
   gstreamer1.0-plugins-bad-kms \
   x264 \
   opencv opencv-apps \
-  cjson \
-  nlohmann-json \
+  cjson nlohmann-json \
   python3 python3-core python3-venv python3-pip python3-setuptools python3-wheel \
   python3-numpy python3-pyyaml python3-can \
   can-utils iproute2 i2c-tools \
+  tcpdump ca-certificates \
   libdrm libdrm-tests \
-  librealsense2 librealsense2-debug-tools librealsense2-dbg \
+  libgbm libegl-mesa libgles2-mesa \
+  xserver-xorg xinit xauth \
+  mesa \
+  qtbase qtbase-plugins \
+  libx11 libx11-xcb libxcb libxext libxrender libxi libxrandr \
+  wayland libxkbcommon \
+  gtk+3 cairo \
+  libxcrypt libffi sqlite3 bzip2 xz readline gdbm keyutils krb5 \
+  libss libext2fs libe2p \
+  linux-firmware-rpidistro-bcm43455 \
+  hailo-pci hailo-firmware hailort \
+  librealsense2 librealsense2-debug-tools \
   aiblackbox-can aiblackbox-diagnostics libhardware \
-  tcpdump \
-  python3-core python3-modules \
-  python3-numpy \
-  python3-pygobject \
-  gobject-introspection \
+  gobject-introspection gobject-introspection-dev \
+  glib-2.0 glib-2.0-dev \
+  libffi-dev \
+  cairo-dev \
+  pkgconfig gcc make meson ninja \
+  file glibc-utils \
 "
-IMAGE_INSTALL:append = " aibb-spi0-mcp2515 "
-IMAGE_INSTALL:append = " kernel-module-spidev kernel-module-mcp251x kernel-module-can kernel-module-can-raw kernel-module-can-dev "
-IMAGE_CLASSES += "rpi-config"
-IMAGE_FSTYPES += " rpi-sdimg "
+# (선택) Hailo 드라이버 자동 로드 - 드라이버 모듈명이 hailo_pci 인 경우
+KERNEL_MODULE_AUTOLOAD += " hailo_pci "
+
+# (SPI CAN 자동 로드/설정은 기존 그대로 유지)
+IMAGE_CLASSES        += "rpi-config"
+IMAGE_FSTYPES        += "rpi-sdimg"
 KERNEL_MODULE_AUTOLOAD += " mcp251x can can-raw can-dev "
+
+# (선택) SPI0 MCP2515 오버레이 패키지가 따로면 유지
+IMAGE_INSTALL:append = " aibb-spi0-mcp2515  python38-bin python38-bin fontconfig ttf-dejavu-sans ttf-dejavu-sans-mono ttf-dejavu-serif xserver-xorg libxkbcommon xkeyboard-config xcb-util xcb-util-image xcb-util-keysyms xcb-util-wm fontconfig ttf-dejavu-sans ttf-dejavu-sans-mono ttf-dejavu-serif libdrm libgbm libegl-mesa libgles2-mesa libinput"
+EXTRA_USERS_PARAMS:append = " usermod -p '$(openssl passwd -6 raspberry)' root; "
+CMDLINE:append = " console=tty1 video=HDMI-A-1:800x480@60D"
+IMAGE_INSTALL:append = " python38-bin python38-bin fontconfig ttf-dejavu-sans ttf-dejavu-sans-mono ttf-dejavu-serif xserver-xorg libxkbcommon xkeyboard-config xcb-util xcb-util-image xcb-util-keysyms xcb-util-wm fontconfig ttf-dejavu-sans ttf-dejavu-sans-mono ttf-dejavu-serif libdrm libgbm libegl-mesa libgles2-mesa libinput"
