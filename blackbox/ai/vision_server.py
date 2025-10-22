@@ -31,7 +31,29 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
 
-
+color_map = [
+    (0, 0, 255),   
+    (0, 127, 255),   
+    (0, 255, 127),   
+    (0, 255, 0), 
+    (127, 255, 0),   
+    (255, 255, 0),   
+    (255, 127, 0),   
+    (255, 0, 0) ,
+    (255,0,127),
+    (255,0,255),
+    (127,0,255)
+]
+mapped_class_names = ['car',
+                    'truck',
+                    'construction_vehicle',
+                    'bus',
+                    'trailer',
+                    'barrier',
+                    'motorcycle',
+                    'bicycle',
+                    'pedestrian',
+                    'traffic_cone']
 DEBUGMODE = False
 # =================== 설정 ===================
 # 입력(카메라)
@@ -586,7 +608,7 @@ def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
         corners_px = _meters_to_pixels(corners_m, (ox, oy), scale)
 
         # 박스
-        cv2.polylines(canvas, [corners_px], isClosed=True, color=(0,0,255), thickness=2)
+        cv2.polylines(canvas, [corners_px], isClosed=True, color=color_map[labels[i]], thickness=2)
 
         # 진행방향(앞쪽 에지의 중점)
         front_mid_m = (corners_m[0] + corners_m[1]) / 2.0
@@ -595,7 +617,7 @@ def draw_bev_boxes_on(canvas, dets, score_thresh=0.30, xy_range=61.2):
         cv2.line(canvas, center_px, front_px, (0,0,255), 2)
 
         # 라벨/점수
-        cv2.putText(canvas, f"{int(labels[i])}:{s:.2f}", front_px, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (20,20,20), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"{mapped_class_names[labels[i]]}", front_px, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (20,20,20), 1, cv2.LINE_AA)#아오
 
     # 가장 많이 검출된 영역 계산
     front_counts = region_counts[0:3]
@@ -842,7 +864,7 @@ def main():
                                     bb_tranformer_meta_queue, demo_mng, True)))
 
         threads.append(threading.Thread(target=core.transformer, args=(target, TRANSFORMER_HEF, MATMUL_NPY, bb_tranformer_queue, bb_tranformer_meta_queue, transformer_pp_queue, transformer_pp_meta_queue,
-                                                                       demo_mng,1.2,-2.2)))
+                                                                       demo_mng,2.15,-5.3)))
 
         processes.append(multiprocessing.Process(target=pre_post_process.post_proc,
                                                     args=(transformer_pp_queue, transformer_pp_meta_queue,
@@ -874,8 +896,7 @@ def main():
 
         try :
             while True:
-                
-                log("wating analyze cmd...")
+
                 line = sys.stdin.readline()
                 if not line:
                     log("stdin closed. exiting.")
@@ -887,7 +908,6 @@ def main():
                     continue
 
                 images_record = []
-                
                 if cmd == "analyze":
                     # 1) 6캠 프레임 수집
                     images_after_pre = []
@@ -933,10 +953,10 @@ def main():
                             draw_index=True
                         )
 
-                        #if DEBUGMODE:
+                        if DEBUGMODE:
                             # 🌟 수정된 창 이름
-                            #cv2.imshow("Cams 3x2", mosaic)
-                            #cv2.waitKey(1)
+                            cv2.imshow("Cams 3x2", mosaic)
+                            cv2.waitKey(1)
 
                         bev_480, payload_draw = render_bev_frame(
                             map_image, det_for_bev_q, (payload, anlalyze_paylaod),
@@ -945,22 +965,21 @@ def main():
                         
                         _, pos = draw_bev_boxes_on(bev_480, det_for_bev_q.get() if not det_for_bev_q.empty() else None)
                         
-                        img_top    = images_record[pos[0]] if len(images_record) > pos[0] else None
-                        img_bottom = images_record[pos[1]] if len(images_record) > pos[1] else None
+                        img_top    = images_record[0] if len(images_record) > pos[0] else None
+                        img_bottom = images_record[3] if len(images_record) > pos[1] else None
 
                         # Dashboard for display
                         dashboard_display = compose_dashboard_800x450_two_imgs_left_bev_right(img_top, img_bottom, bev_480)
 
                         H, W = bev_480.shape[:2]
-                        txt1 = f"tires {payload['tires'][0]:.1f}, {payload['tires'][1]:.1f}, {payload['tires'][2]:.1f}, {payload['tires'][3]:.1f}"
+                        txt1 = f"tires {payload['tires'][0]:.1f}, {payload['tires'][1]:.1f}, {payload['tires'][2]:.1f}, {payload['tires'][3]:.1f} event : {payload['value']}"
                         txt2 = f"speed : {payload['speed']:.1f} km/h brake :{payload_draw['brake_state']}%  throttle : {payload_draw['throttle']} % rpm : {payload_draw['rpm']}"
-                        log(txt1)
-                        log(txt2)
+
                         # Display Dashboard에 텍스트 그리기
-                        cv2.putText(dashboard_display, txt1, (410, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
-                        cv2.putText(dashboard_display, txt1, (410, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
-                        cv2.putText(dashboard_display, txt2, (410, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
-                        cv2.putText(dashboard_display, txt2, (410, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt1, (20, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt1, (20, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt2, (20, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
+                        cv2.putText(dashboard_display, txt2, (20, H - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
                         
                         cv2.imshow(WIN, dashboard_display)
 
