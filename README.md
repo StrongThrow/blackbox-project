@@ -319,6 +319,17 @@ $ python vision_server.py
 
 ---
 
+### 팀원 소개
+
+| 이름 | 담당 |
+|------|------|
+| **강송구** | PM / APP / HW |
+| **김기환** | APP / Carla |
+| **김민성** | Yocto |
+| **이두현** | Gstream / AI / Carla |
+| **정찬영** | AI / HW / 3D printing |
+
+
 
 
 
