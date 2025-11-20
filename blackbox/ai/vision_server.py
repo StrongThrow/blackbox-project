@@ -1033,7 +1033,7 @@ def main():
                         ts = time.strftime("%Y-%m-%d %H:%M:%S")
                         with open(SPECIAL_LINE_PATH, "a", encoding="utf-8") as f:
                             f.write(f"[{ts}] : event value : {event}\n")
-                        if ((event & 0x77) != 0x00):
+                        if ((event & 0x7F) != 0x00):
                             log(f"event : {event}")
                             trigger_str = recoder_event(event)
                             rec_events.trigger(str(trigger_str))
