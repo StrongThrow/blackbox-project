@@ -302,7 +302,7 @@ class TimeWindowEventRecorder6:
                 N = len(items)
                 fps_out = max(1.0, min(30.0, float(N) / max(0.001, duration_s)))
                 
-                vw_path = str(Path(event_dir) / f"cam{cam}.mp4")
+                vw_path = str(Path(event_dir) / f"recode.mp4")
                 vw = cv2.VideoWriter(vw_path, self.fourcc, fps_out, (w, h))
                 if not vw.isOpened():
                     print(f"[ERR] VideoWriter open failed: {vw_path}")
@@ -315,3 +315,144 @@ class TimeWindowEventRecorder6:
 
             print(f"[SAVE] {event_dir} frames_total={len(window)} "
                   f"→ fixed_duration={duration_s:.2f}s (variable FPS)")
+            
+
+class AlwaysOnRecorder6:
+    def __init__(self, out_dir="always6", size=(800, 450),
+                 num_cams=6,
+                 segment_sec=60.0,      # 60초짜리 파일로 자름
+                 max_storage_gb=16.0,   # 상시녹화 전체 용량 제한
+                 fourcc_str="mp4v",
+                 fps_hint=5.0):
+        """
+        fps_hint: 파일 헤더에 대략 넣어줄 기본 fps (실제 fps는 ts에서 다시 계산)
+        """
+        self.num_cams = num_cams
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        self.size = tuple(size)
+        self.segment_sec = float(segment_sec)
+        self.max_storage_bytes = int(max_storage_gb * (1024**3))
+        self.fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        self.fps_hint = float(fps_hint)
+
+        self._lock = threading.Lock()
+
+        # 현재 세그먼트 버퍼: 카메라별로 [(ts, frame_bgr), ...]
+        self._seg_start_ts = None
+        self._seg_buf = [[] for _ in range(self.num_cams)]  # list[list[(ts, frame)]]
+
+    def push_batch(self, frames, ts=None):
+        """
+        frames: 길이 num_cams의 BGR np.ndarray 리스트
+        ts: float epoch seconds
+        """
+        if ts is None:
+            ts = time.time()
+        assert len(frames) == self.num_cams
+
+        # 세그먼트 버퍼에만 쌓고, 세그먼트가 끝나면 한 번에 mp4로 저장
+        with self._lock:
+            if self._seg_start_ts is None:
+                self._seg_start_ts = ts
+
+            for cam_id, fr in enumerate(frames):
+                if fr is None:
+                    continue
+                if fr.shape[1] != self.size[0] or fr.shape[0] != self.size[1]:
+                    fr = cv2.resize(fr, self.size)
+                # BGR 프레임 그대로 저장 (복사해서 보관)
+                self._seg_buf[cam_id].append((ts, fr.copy()))
+
+            # 세그먼트 종료 조건: 현재 ts - 시작 ts >= segment_sec
+            should_flush = (ts - self._seg_start_ts >= self.segment_sec)
+
+            if should_flush:
+                seg_start_ts = self._seg_start_ts
+                seg_buf_copy = self._seg_buf
+                # 다음 세그먼트를 위한 초기화
+                self._seg_start_ts = None
+                self._seg_buf = [[] for _ in range(self.num_cams)]
+        # with 블록 밖에서 실제 파일 쓰기 (I/O는 락 밖에서)
+        if should_flush:
+            self._save_segment(seg_start_ts, seg_buf_copy)
+            # 세그먼트 저장 후 용량 체크
+            self._cleanup_if_needed()
+
+    def _save_segment(self, seg_start_ts, seg_buf_per_cam):
+        """
+        seg_start_ts: 세그먼트 시작 시각
+        seg_buf_per_cam: [cam0_list, cam1_list, ...],
+                         각 리스트는 [(ts, frame_bgr), ...]
+        """
+        if seg_start_ts is None:
+            return
+
+        ts_str = datetime.datetime.fromtimestamp(seg_start_ts).strftime("%Y%m%d_%H%M%S")
+
+        for cam in range(self.num_cams):
+            items = seg_buf_per_cam[cam]
+            if not items:
+                continue
+
+            # 실제 구간 길이 및 fps 계산
+            t0 = items[0][0]
+            t1 = items[-1][0]
+            duration = max(t1 - t0, 0.001)
+            N = len(items)
+            fps_out = float(N) / duration  # 실제 fps
+            fps_out = max(1.0, min(30.0, fps_out))  # 안전 범위 제한
+
+            img0 = items[0][1]
+            h, w = img0.shape[:2]
+
+            cam_dir = self.out_dir / f"cam{cam}"
+            cam_dir.mkdir(parents=True, exist_ok=True)
+            filename = cam_dir / f"{ts_str}.mp4"
+
+            vw = cv2.VideoWriter(str(filename), self.fourcc, fps_out, (w, h))
+            if not vw.isOpened():
+                print(f"[ALWAYS][ERR] open fail: {filename}")
+                continue
+
+            for _, fr in items:
+                vw.write(fr)
+            vw.release()
+
+            print(f"[ALWAYS][SAVE] {filename} N={N} duration={duration:.2f}s fps_out={fps_out:.2f}")
+
+    def _cleanup_if_needed(self):
+        # 전체 용량 계산
+        files = list(self.out_dir.rglob("*.mp4"))
+        if not files:
+            return
+        total = sum(p.stat().st_size for p in files)
+        if total <= self.max_storage_bytes:
+            return
+
+        # 오래된 파일부터 삭제 (mtime 기준)
+        files.sort(key=lambda p: p.stat().st_mtime)
+        for p in files:
+            if total <= self.max_storage_bytes:
+                break
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                total -= size
+                # print(f"[ALWAYS] delete {p}, total={total}")
+            except Exception as e:
+                print("[ALWAYS][DEL][ERR]", p, e)
+
+    def close(self):
+        """
+        남아 있는 세그먼트가 있으면 마저 저장.
+        """
+        with self._lock:
+            seg_start_ts = self._seg_start_ts
+            seg_buf_copy = self._seg_buf
+            self._seg_start_ts = None
+            self._seg_buf = [[] for _ in range(self.num_cams)]
+        if seg_start_ts is not None:
+            self._save_segment(seg_start_ts, seg_buf_copy)
+

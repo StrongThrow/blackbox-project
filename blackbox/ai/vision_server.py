@@ -18,7 +18,6 @@ import pre_post_process
 import core
 import demo_manager
 import async_api
-import visualization
 import recorder
 
 
@@ -68,9 +67,15 @@ TRANSFORMER_HEF = os.path.join(MODELS_DIR, "petrv2_repvggB0_transformer_pp_800x3
 POSTPROC_ONNX   = os.path.join(MODELS_DIR, "petrv2_postprocess.onnx")
 MATMUL_NPY      = os.path.join(MODELS_DIR, "matmul.npy")
 MAP_PATH       = os.path.join(MODELS_DIR, "map.png")
+
+
 from pathlib import Path
-RECORDER_PATH = Path(os.environ.get("BB_OUT_DIR", Path.home() / "blackbox" / "event6"))
-RECORDER_PATH.mkdir(parents=True, exist_ok=True)
+BASE_REC_DIR = Path(os.environ.get("BB_OUT_DIR", "/home/root/blackbox"))
+RECORDER_EVENT_PATH  = BASE_REC_DIR / "event6"
+RECORDER_ALWAYS_PATH = BASE_REC_DIR / "always6"
+
+RECORDER_EVENT_PATH.mkdir(parents=True, exist_ok=True)
+RECORDER_ALWAYS_PATH.mkdir(parents=True, exist_ok=True)
 MAX_QUEUE_SIZE = 3
 # BEV 렌더링
 BEV_SIZE = 640
@@ -87,7 +92,7 @@ BEV_OVERSCAN = 1.2
 EVENT_ACCEL         = 1 << 0
 EVENT_BRAKE         = 1 << 1
 EVENT_PEDESTRIAN    = 1 << 2
-EVENT_TROTTLE       = 1 << 3
+EVENT_BUGROCK       = 1 << 3
 EVENT_TRUCK         = 1 << 4
 EVENT_MOTORCYCLE    = 1 << 5
 EVENT_PUNK          = 1 << 6
@@ -241,7 +246,7 @@ def recoder_event(event_flags):
     if event_flags & EVENT_ACCEL:       parts.append("accel")
     if event_flags & EVENT_BRAKE:       parts.append("brake")
     if event_flags & EVENT_PEDESTRIAN:  parts.append("pedestrian")
-    if event_flags & EVENT_TROTTLE:     parts.append("throttle")
+    if event_flags & EVENT_BUGROCK:     parts.append("bugrock")
     if event_flags & EVENT_TRUCK:       parts.append("truck")
     if event_flags & EVENT_MOTORCYCLE:  parts.append("motorcycle")
     if event_flags & EVENT_PUNK:        parts.append("punk")
@@ -817,14 +822,24 @@ def main():
 
 
     # Recorder 초기화
-    rec = recorder.TimeWindowEventRecorder6(
-         out_dir=str(RECORDER_PATH),
+    rec_events = recorder.TimeWindowEventRecorder6(
+         out_dir=str(RECORDER_EVENT_PATH),
+    
          size=(800, 450),
          pre_secs=5.0, post_secs=5.0,
          retention_secs=15.0,
          save_as="mp4",
          target_fps=5.0,
          exact_count=False
+    )
+
+    rec_always = recorder.AlwaysOnRecorder6(
+        out_dir=str(RECORDER_ALWAYS_PATH),  # 예: /blackbox/always6
+        size=(800, 450),
+        num_cams=1,
+        segment_sec=60.0,     # 1분 단위 세그먼트
+        max_storage_gb=16.0,  # 상시녹화 용량
+        fps_hint=5.0
     )
 
 
@@ -890,6 +905,7 @@ def main():
         log("init done")
         WIN = "Dashboard"
         cv2.namedWindow(WIN, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
+        cv2.resizeWindow(WIN, LCD_W, 480)
         if not DEBUGMODE: #디버그 안할땐 풀스크린 하면 안됨
             cv2.setWindowProperty(WIN, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         cv2.moveWindow(WIN, 0, 0)
@@ -973,6 +989,20 @@ def main():
                         txt1 = f"tires {payload['tires'][0]:.1f}, {payload['tires'][1]:.1f}, {payload['tires'][2]:.1f}, {payload['tires'][3]:.1f} event : {payload['value']}"
                         txt2 = f"speed : {payload['speed']:.1f} km/h brake :{payload_draw['brake_state']}%  throttle : {payload_draw['throttle']} % rpm : {payload_draw['rpm']}"
 
+                        path_x = payload.get('path_x', [])
+                        path_y = payload.get('path_y', [])
+
+                        n = min(len(path_x), len(path_y))
+                        scale = (W/2)*XY_RANGE_M
+                        for i in range(n - 1):
+                            log(f"pixel {i}: ({path_x[i]}, {path_y[i]})")
+                            x1 = int(240-path_x[i])
+                            y1 = int(path_y[i]+ 240)
+                            x2 = int(240-path_x[i+1])
+                            y2 = int(path_y[i+1]+240)
+                            cv2.line(bev_480, (y1, x1), (y2, x2), (0, 0, 255), 3)
+
+
                         # Display Dashboard에 텍스트 그리기
                         cv2.putText(bev_480, txt1, (20, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2, cv2.LINE_AA)
                         cv2.putText(bev_480, txt1, (20, H - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
@@ -986,8 +1016,10 @@ def main():
 
                         # Dashboard for recording
                         record_dashboard = compose_dashboard_800x450_mosaic_left_bev_right(mosaic, bev_480)
+                        now_ts = time.time()
                         # 🌟 cam_id 추가
-                        rec.push_single(record_dashboard, cam_id=0)
+                        rec_events.push_single(record_dashboard, cam_id=0)
+                        rec_always.push_batch([record_dashboard], ts=now_ts)
 
                         key = cv2.waitKey(1) & 0xFF
                         if key in (27, ord('q')):
@@ -999,11 +1031,12 @@ def main():
                         event = payload['value']
                         SPECIAL_LINE_PATH = "./special_event_log.txt"
                         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-
-                        if ((event & EVENT_NONE) == 0x00) and ((event & 0x3F) != 0x00):
+                        with open(SPECIAL_LINE_PATH, "a", encoding="utf-8") as f:
+                            f.write(f"[{ts}] : event value : {event}\n")
+                        if ((event & 0x7F) != 0x00):
                             log(f"event : {event}")
                             trigger_str = recoder_event(event)
-                            rec.trigger(str(trigger_str))
+                            rec_events.trigger(str(trigger_str))
                             with open(SPECIAL_LINE_PATH, "a", encoding="utf-8") as f:
                                 f.write(f"[{ts}] {trigger_str} : event value : {event}\n")
                         log("end draw ...")
@@ -1023,6 +1056,9 @@ def main():
             for p in processes: p.join(timeout=2)
 
             for r in receivers: r.stop()
+
+            rec_events.close()
+            rec_always.close()
 
             cv2.destroyAllWindows()
 
