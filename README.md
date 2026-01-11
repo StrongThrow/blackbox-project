@@ -3,7 +3,7 @@
 AI 기반으로 차량의 위험 상황을 실시간 분석하고, 사고 전후의 맥락을 함께 저장하는 지능형 블랙박스 시스템입니다.
 단순한 영상 기록을 넘어, 차량 센서 데이터(CAN)와 AI 모델 분석을 결합해 위험도 기반의 이벤트 감지를 수행합니다.
 
-<!-- GIF나 이미지 데모 추가 가능: ![데모 GIF](img/demo.gif) -->
+YouTube : https://youtu.be/SppCN_PzfD0
 
 # 목차
 - [프로젝트 개요](#프로젝트-개요)
@@ -329,6 +329,7 @@ $ python vision_server.py
 | **김민성** | Yocto |
 | **이두현** | Gstream / AI / Carla |
 | **정찬영** | AI / HW / 3D printing |
+
 
 
 
