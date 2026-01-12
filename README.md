@@ -315,7 +315,7 @@ $ python vision_server.py
 ### 결과 및 시연
 
 ```bash
-
+YouTube : https://youtu.be/SppCN_PzfD0
 ```
 
 ---
@@ -329,6 +329,7 @@ $ python vision_server.py
 | **김민성** | Yocto |
 | **이두현** | Gstream / AI / Carla |
 | **정찬영** | AI / HW / 3D printing |
+
 
 
 
