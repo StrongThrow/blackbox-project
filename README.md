@@ -141,7 +141,7 @@ Yocto Project는 임베디드 소프트웨어 개발을 위한 도구 체인을 
 ### 하드웨어 구성
 
 <img width="1247" height="553" alt="image" src="https://github.com/user-attachments/assets/83881d7c-a061-4597-8b1e-620f1ecab3da" />
-![Image](https://github.com/user-attachments/assets/5c120d0e-dff3-4c31-9fdc-780ba752df26)
+<img width="1247" height="553" alt="image" src="https://github.com/user-attachments/assets/5c120d0e-dff3-4c31-9fdc-780ba752df26" />
 
 ------
 
@@ -329,6 +329,7 @@ $ python vision_server.py
 | **김민성** | Yocto |
 | **이두현** | Gstream / AI / Carla |
 | **정찬영** | AI / HW / 3D printing |
+
 
 
 
